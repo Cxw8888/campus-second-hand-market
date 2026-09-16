@@ -10,9 +10,8 @@
  * 登录态是**复用**的（不做第二个登录页）：能不能进这个壳由路由守卫按 role===1 决定，
  * 后端侧的真正把关是 AuthInterceptor 的 @RequireRole(1)。
  *
- * 菜单：5.1 已接上「商品审核」，5.2 接上「用户管理 / 订单管理」；
- * 5.3 的「分类管理 / 审计日志」仍做成**禁用 + tooltip 说明**，而不是先放一个点了报错的假按钮 ——
- * 这条规矩在批次 2 就定下来了（后端不支持的功能一律禁用 + tooltip，这里同理）。
+ * 菜单：5.1 商品审核 / 5.2 用户管理·订单管理 / 5.3 分类管理·审计日志 —— 五个入口现已全部接上真实路由，
+ * 管理端不再有"禁用占位"项；「待开放」分组随之移除。
  */
 import { computed } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
@@ -36,17 +35,13 @@ const userStore = useUserStore()
 const username = computed(() => userStore.displayName)
 const avatarLabel = computed(() => (username.value || '管').trim().charAt(0))
 
-/** 已实现的菜单（一律命名路由，不写 path 字符串） */
+/** 已实现的菜单（一律命名路由，不写 path 字符串）：5.1 商品审核 / 5.2 用户·订单 / 5.3 分类·审计 */
 const menus = [
   { name: 'admin-product-audit', label: '商品审核', icon: Goods },
   { name: 'admin-user', label: '用户管理', icon: User },
-  { name: 'admin-order', label: '订单管理', icon: List }
-]
-
-/** 后续批次（5.3）要实现的菜单，先占位并说明原因 */
-const pendingMenus = [
-  { key: 'category', label: '分类管理', icon: CollectionTag, note: '将在 5.3 实现' },
-  { key: 'audit-log', label: '审计日志', icon: Tickets, note: '将在 5.3 实现' }
+  { name: 'admin-order', label: '订单管理', icon: List },
+  { name: 'admin-category', label: '分类管理', icon: CollectionTag },
+  { name: 'admin-audit-log', label: '审计日志', icon: Tickets }
 ]
 
 const pageTitle = computed(() => route.meta?.title || '管理后台')
@@ -84,20 +79,6 @@ async function handleLogout() {
           <el-icon :size="15"><component :is="item.icon" /></el-icon>
           <span>{{ item.label }}</span>
         </router-link>
-
-        <p class="admin__nav-group">待开放</p>
-
-        <el-tooltip
-          v-for="item in pendingMenus"
-          :key="item.key"
-          :content="item.note"
-          placement="right"
-        >
-          <span class="admin__nav-item is-disabled" aria-disabled="true">
-            <el-icon :size="15"><component :is="item.icon" /></el-icon>
-            <span>{{ item.label }}</span>
-          </span>
-        </el-tooltip>
       </nav>
 
       <div class="admin__side-foot">

@@ -452,6 +452,39 @@ export function adminOrderStatusTabLabel(status) {
   return `${orderStatusLabel(status)}${ADMIN_ORDER_STATUS_TAB_NOTES[status] ?? ''}`
 }
 
+/** 分类名长度上限（后端 CategorySaveRequest.java:20 是 @Size(max=50)） */
+export const CATEGORY_NAME_MAX = 50
+
+/**
+ * 分类排序权重的前端兜底范围
+ *
+ * ⚠️ 后端 `CategorySaveRequest.sort` **没有 @Min/@Max**（只有 `Integer sort = 0` 默认值，
+ *    且 ServiceImpl 会把 null 兜成 0：CategoryServiceImpl.java:83/104）。
+ *    所以 0 ~ 9999 是**纯前端兜底**，不是后端约束 —— 目的是防止管理员手滑输入负数/超大值
+ *    导致列表排序语义失控（数据量大时排序值会有明显的主次关系）。
+ */
+export const ADMIN_CATEGORY_SORT_MIN = 0
+export const ADMIN_CATEGORY_SORT_MAX = 9999
+
+/**
+ * 审计日志的「目标类型」字典
+ *
+ * 取值来自后端 `AdminAuditService.record(...)` 的 targetType 实参（javadoc 明确列出
+ * PRODUCT / USER / ORDER / CATEGORY，AdminAuditService.java:43），调用点见
+ * AdminServiceImpl / AdminCategoryController —— 是**字符串常量**，不是枚举，前端不能自造。
+ */
+export const AUDIT_TARGET_TYPE_MAP = {
+  PRODUCT: '商品',
+  USER: '用户',
+  ORDER: '订单',
+  CATEGORY: '分类'
+}
+
+export function auditTargetTypeLabel(type) {
+  if (!type) return '—'
+  return AUDIT_TARGET_TYPE_MAP[type] ?? type
+}
+
 // ------------------------------------------------------------------ 业务响应码（按需补充）
 /** 与后端 ErrorCode 对齐，只列出前端会做特殊处理的部分 */
 export const CODE = {

@@ -28,6 +28,7 @@ import { useUserStore } from '@/stores/user'
 import { useNotificationStore } from '@/stores/notification'
 import { compressImage, formatBytes, isImageFile } from '@/utils/image'
 import { avatarText, formatDate } from '@/utils/format'
+import { adminRoleLabel } from '@/utils/constants'
 
 const router = useRouter()
 const userStore = useUserStore()
@@ -44,7 +45,9 @@ const myProductCount = ref(0)
 const CAMPUS_EMAIL_PATTERN = /^[A-Za-z0-9._%+-]+@(stu|campus)\.edu\.cn$/
 const PASSWORD_PATTERN = /^(?=.*[A-Za-z])(?=.*\d)(?=.*[^A-Za-z0-9]).{8,20}$/
 
-const roleText = computed(() => (Number(profile.value?.role) === 1 ? '管理员' : '学生'))
+/** 角色文案统一走 constants.js 的字典（5.3 顺手修掉这里的硬编码）；
+ *  资料未加载完时不显示（避免把"未知"说成"学生"） */
+const roleText = computed(() => (profile.value ? adminRoleLabel(profile.value.role) : ''))
 
 /**
  * 快捷入口（收藏 / 消息 / 订单 / 我的发布）

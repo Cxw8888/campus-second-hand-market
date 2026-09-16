@@ -74,6 +74,21 @@ const REQUIRED = [
     // 5.2 新增：用户管理、订单管理两个列表都带分页
     keyword: '.el-pagination{',
     guard: 'el-pagination 分页器（管理端用户 / 订单列表）'
+  },
+  {
+    // 5.3 新增：审计日志的时间范围筛选用 datetimerange
+    keyword: '.el-date-editor',
+    guard: 'el-date-editor 日期时间选择器（批次 5.3 首次引入：审计日志时间筛选）'
+  },
+  {
+    // 5.3 新增：分类管理的新增/编辑表单弹窗 + 208 迁移引导弹窗
+    keyword: '.el-dialog{',
+    guard: 'el-dialog 对话框（批次 5.3 首次引入：分类新增/编辑 + 迁移引导）'
+  },
+  {
+    // 5.3 新增：分类排序权重输入（整数、可步进）
+    keyword: '.el-input-number',
+    guard: 'el-input-number 数字输入框（批次 5.3 首次引入：分类排序权重）'
   }
 ]
 

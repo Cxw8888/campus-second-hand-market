@@ -146,4 +146,27 @@ describe('管理端路由守卫', () => {
     await router.push('/admin/user')
     expect(router.currentRoute.value.name).toBe('admin-user')
   })
+
+  it('⑧ 5.3 新增的 /admin/category 与 /admin/audit-log 同样受角色保护（子路由继承父级 meta）', async () => {
+    setToken('student-token')
+    const userStore = useUserStore()
+    userStore.userInfo = { userId: '17', nickname: '买家同学', role: 0 }
+
+    await router.push({ name: 'home' })
+    await router.push('/admin/category')
+    expect(router.currentRoute.value.name).toBe('forbidden')
+
+    await router.push({ name: 'home' })
+    await router.push('/admin/audit-log')
+    expect(router.currentRoute.value.name).toBe('forbidden')
+
+    userStore.userInfo = { userId: '1', nickname: '管理员', role: 1 }
+    await router.push({ name: 'home' })
+    await router.push('/admin/category')
+    expect(router.currentRoute.value.name).toBe('admin-category')
+
+    await router.push({ name: 'home' })
+    await router.push('/admin/audit-log')
+    expect(router.currentRoute.value.name).toBe('admin-audit-log')
+  })
 })
