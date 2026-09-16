@@ -1,0 +1,198 @@
+server:
+  port: ${SERVER_PORT:8080}
+  servlet:
+    encoding:
+      charset: UTF-8
+      enabled: true
+      force: true
+  # 预留: 生产环境建议开启优雅停机 (P2 未来扩展)
+  # shutdown: graceful
+
+spring:
+  application:
+    name: campus-market
+  profiles:
+    active: ${SPRING_PROFILES_ACTIVE:dev}
+
+  # ---------------- 数据源 (敏感配置走环境变量) ----------------
+  datasource:
+    driver-class-name: com.mysql.cj.jdbc.Driver
+    url: jdbc:mysql://${DB_HOST:127.0.0.1}:${DB_PORT:3306}/${DB_NAME:campus_market}?useUnicode=true&characterEncoding=utf8&useSSL=false&allowPublicKeyRetrieval=true&serverTimezone=GMT%2B8&rewriteBatchedStatements=true
+    username: ${DB_USERNAME:campus_user}
+    password: ${DB_PASSWORD:123456}
+    hikari:
+      minimum-idle: 5
+      maximum-pool-size: 20
+      connection-timeout: 30000
+
+  # ---------------- Redis ----------------
+  data:
+    redis:
+      host: ${REDIS_HOST:127.0.0.1}
+      port: ${REDIS_PORT:6379}
+      password: ${REDIS_PASSWORD:}
+      database: ${REDIS_DATABASE:0}
+      timeout: 3000ms
+      lettuce:
+        pool:
+          max-active: 16
+          max-idle: 8
+          min-idle: 2
+          max-wait: 2000ms
+
+  # ---------------- Jackson: Long -> String, GMT+8 ----------------
+  jackson:
+    date-format: yyyy-MM-dd HH:mm:ss
+    time-zone: GMT+8
+    default-property-inclusion: non_null
+
+  # ---------------- 文件上传 ----------------
+  servlet:
+    multipart:
+      max-file-size: 5MB
+      max-request-size: 60MB
+
+  # ---------------- Flyway 版本化迁移 ----------------
+  flyway:
+    enabled: true
+    locations: classpath:db/migration
+    baseline-on-migrate: true
+    baseline-version: 0
+    encoding: UTF-8
+    validate-on-migrate: true
+
+  # ---------------- 邮件 (毕设降级开关见 app.email.skip) ----------------
+  mail:
+    host: ${MAIL_HOST:smtp.example.com}
+    port: ${MAIL_PORT:465}
+    username: ${MAIL_USERNAME:}
+    password: ${MAIL_PASSWORD:}
+    default-encoding: UTF-8
+    properties:
+      mail:
+        smtp:
+          auth: true
+          ssl:
+            enable: true
+          connectiontimeout: 5000
+          timeout: 5000
+          writetimeout: 5000
+
+# ---------------- MyBatis-Plus ----------------
+mybatis-plus:
+  mapper-locations: classpath*:/mapper/**/*.xml
+  type-aliases-package: com.campus.market.entity
+  configuration:
+    map-underscore-to-camel-case: true
+    cache-enabled: false
+  global-config:
+    banner: false
+    db-config:
+      id-type: auto
+      logic-delete-field: isDeleted
+      logic-delete-value: 1
+      logic-not-delete-value: 0
+
+# ---------------- Actuator (默认仅 health; prometheus 为可选实现) ----------------
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health
+        # 可选实现: 需要 Prometheus 时追加 prometheus
+  endpoint:
+    health:
+      show-details: when-authorized
+
+# ---------------- SpringDoc / knife4j ----------------
+springdoc:
+  api-docs:
+    path: /v3/api-docs
+  swagger-ui:
+    path: /swagger-ui.html
+knife4j:
+  enable: true
+
+# =====================================================================
+# 业务自定义配置 (app.*)
+# =====================================================================
+app:
+  jwt:
+    # 严禁硬编码: 必须由环境变量注入, 长度 >= 32 字节
+    secret: ${JWT_SECRET:campus-market-dev-secret-key-please-override-in-env-32bytes}
+    expire-hours: ${JWT_EXPIRE_HOURS:2}
+    issuer: campus-market
+
+  # CORS: allowedOrigins 走环境变量, 严禁生产使用 *
+  cors:
+    allowed-origins: ${CORS_ALLOWED_ORIGINS:http://localhost:5173,http://127.0.0.1:5173}
+    allow-credentials: true
+    allowed-methods: GET,POST,PUT,DELETE,OPTIONS
+    allowed-headers: Authorization,Content-Type
+    max-age: 3600
+
+  # 文件存储抽象: local(默认, 毕设推荐) | minio
+  storage:
+    type: ${STORAGE_TYPE:local}
+    local:
+      base-path: ${STORAGE_LOCAL_PATH:./uploads}
+      url-prefix: ${STORAGE_URL_PREFIX:/static/uploads}
+    minio:
+      endpoint: ${MINIO_ENDPOINT:}
+      access-key: ${MINIO_ACCESS_KEY:}
+      secret-key: ${MINIO_SECRET_KEY:}
+      bucket: ${MINIO_BUCKET:campus-market}
+
+  # 邮件降级开关: 开发/答辩环境默认 true, 验证码直接返回, 不依赖 SMTP
+  email:
+    skip: ${EMAIL_SKIP:true}
+    code-expire-seconds: 300
+    limit-seconds: 60
+    fail-lock-threshold: 5
+    fail-lock-seconds: 1800
+    fail-window-seconds: 3600
+    # 校园邮箱后缀允许列表: 严禁硬编码在代码中
+    campus-suffixes: ${CAMPUS_EMAIL_SUFFIXES:@stu.edu.cn,@campus.edu.cn}
+
+  security:
+    login:
+      account-fail-threshold: 5
+      account-fail-ttl-seconds: 300
+      account-lock-seconds: 900
+      ip-fail-threshold: 20
+      ip-fail-window-seconds: 300
+      ip-lock-seconds: 1800
+
+  order:
+    token-ttl-seconds: 300
+
+  # order_no 雪花算法必须配置 workerId
+  snowflake:
+    worker-id: ${SNOWFLAKE_WORKER_ID:1}
+    datacenter-id: ${SNOWFLAKE_DATACENTER_ID:1}
+
+  task:
+    # 自定义线程池: 核心 8 (4核×2 IO 密集型), 最大 16, 队列 200, CallerRunsPolicy
+    notification:
+      core-pool-size: 8
+      max-pool-size: 16
+      queue-capacity: 200
+      keep-alive-seconds: 60
+    timeout-cancel:
+      minutes: 15
+      lock-at-most-for: PT5M
+    auto-confirm:
+      days: 7
+      lock-at-most-for: PT10M
+      remind-lock-at-most-for: PT5M
+    refund-reject-recover:
+      days: 3
+      lock-at-most-for: PT10M
+
+logging:
+  level:
+    root: INFO
+    com.campus.market: DEBUG
+  pattern:
+    # requestId 由 RequestIdFilter 写入 MDC，异常日志必须带 requestId
+    console: "%d{yyyy-MM-dd HH:mm:ss.SSS} [%thread] [%X{requestId}] %-5level %logger{36} - %msg%n"

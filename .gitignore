@@ -1,0 +1,18 @@
+# 前端
+frontend/node_modules/
+frontend/dist/
+frontend/.npm-cache/
+
+# 后端
+target/
+*.class
+*.log
+
+# IDE
+.idea/
+*.iml
+.vscode/
+
+# 系统
+.DS_Store
+Thumbs.db

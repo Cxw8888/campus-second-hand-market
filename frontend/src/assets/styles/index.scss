@@ -1,0 +1,153 @@
+// =============================================================================
+//  全局样式（只在 main.js 里引入一次）
+//
+//  分四块：
+//   1. Element Plus 主题变量覆盖（用 CSS 变量的方式，比 SCSS 编译主题稳得多）
+//   2. 轻量 reset
+//   3. 页面级基础排版
+//   4. 跨页面复用的少量工具类
+// =============================================================================
+
+// ------------------------------------------------------------------ 1. Element Plus 主题
+// 说明：Element Plus 2.x 的组件样式全部走 CSS 变量（--el-color-primary 等），
+// 所以在这里覆盖 :root 即可把主题换成品牌绿，无需引入 SCSS 主题编译链（那样更脆）。
+// ── 浅色档位是用「品牌绿混白」算出来的，缺了它们 hover / disabled 会退回默认蓝。
+:root {
+  --el-color-primary: #{$cm-primary};
+  --el-color-primary-light-3: #58cea7;
+  --el-color-primary-light-5: #88dcc0;
+  --el-color-primary-light-7: #b7ead9;
+  --el-color-primary-light-8: #cff1e6;
+  --el-color-primary-light-9: #e7f8f2;
+  --el-color-primary-dark-2: #0d9467;
+
+  --el-color-warning: #{$cm-accent};
+  --el-color-danger: #{$cm-danger};
+
+  --el-text-color-primary: #{$cm-text};
+  --el-text-color-regular: #{$cm-text-secondary};
+  --el-border-color: #{$cm-border};
+  --el-border-color-light: #{$cm-border-light};
+  --el-border-radius-base: #{$cm-radius};
+
+  --el-font-size-base: 14px;
+
+  // 品牌相关的自定义变量，供普通 CSS 使用
+  --cm-header-height: #{$cm-header-height};
+}
+
+// ------------------------------------------------------------------ 2. reset
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#app {
+  height: 100%;
+  margin: 0;
+  padding: 0;
+}
+
+body {
+  background: $cm-bg;
+  color: $cm-text;
+  font-size: 14px;
+  line-height: 1.6;
+  font-family:
+    'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC', 'Hiragino Sans GB',
+    'Microsoft YaHei', 'Helvetica Neue', Arial, sans-serif;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+h1,
+h2,
+h3,
+h4,
+h5,
+h6,
+p,
+figure {
+  margin: 0;
+}
+
+ul,
+ol {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+a {
+  color: inherit;
+  text-decoration: none;
+}
+
+img {
+  display: block;
+  max-width: 100%;
+}
+
+button {
+  font-family: inherit;
+}
+
+// ------------------------------------------------------------------ 3. 排版辅助
+// 数字（价格、统计）用等宽字形，对齐更整齐
+.cm-num {
+  font-variant-numeric: tabular-nums;
+}
+
+// 页面主容器：统一最大宽度与左右留白
+.cm-container {
+  width: 100%;
+  max-width: 1180px;
+  margin: 0 auto;
+  padding: 0 20px;
+}
+
+// 价格：¥ 前缀小一号，数字大号加粗橙色
+.cm-price {
+  @include cm-price(20px);
+  display: inline-flex;
+  align-items: baseline;
+  gap: 1px;
+
+  .cm-price__symbol {
+    font-size: 0.72em;
+    font-weight: 600;
+  }
+}
+
+// ------------------------------------------------------------------ 4. 滚动条（细节但很影响观感）
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+
+::-webkit-scrollbar-thumb {
+  background: #d1d5db;
+  border-radius: $cm-radius-pill;
+
+  &:hover {
+    background: #9ca3af;
+  }
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+// 路由切换的淡入（配合 App.vue 的 <transition>）
+.cm-fade-enter-active,
+.cm-fade-leave-active {
+  transition: opacity 0.18s ease;
+}
+
+.cm-fade-enter-from,
+.cm-fade-leave-to {
+  opacity: 0;
+}

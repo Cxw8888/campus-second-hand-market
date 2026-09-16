@@ -1,0 +1,126 @@
+// =============================================================================
+//  设计变量 & 混入（会被 vite 自动注入到每个 .scss / <style lang="scss"> 顶部）
+//
+//  ⚠️ 本文件只允许出现变量、@mixin、@function —— 一旦写入会产出 CSS 的规则
+//     （比如 :root { ... }），它就会被复制进每一个组件的样式块里。
+//     全局 CSS 请写到 assets/styles/index.scss。
+// =============================================================================
+
+// ------------------------------------------------------------------ 色彩语义
+// 绿 = 品牌色：Logo、导航高亮、次级按钮、成功态
+$cm-primary: #10b981; // 主色·清新绿（环保循环主题）
+$cm-primary-dark: #059669; // 深一档，用于渐变起点 / hover
+$cm-primary-light: #34d399; // 浅一档，用于渐变终点
+$cm-primary-50: #ecfdf5; // 极浅底（选中项背景）
+$cm-primary-100: #d1fae5; // 浅底（标签背景）
+$cm-primary-700: #047857; // 深字（浅底上的文字）
+
+// 橙 = 交易强调色：价格、立即购买、库存告急
+$cm-accent: #f59e0b;
+$cm-accent-dark: #d97706;
+$cm-accent-light: #fbbf24; // 金，用于「立即购买」渐变终点
+$cm-accent-50: #fffbeb;
+
+// 中性色
+$cm-bg: #f9fafb; // 页面背景
+$cm-surface: #ffffff; // 卡片 / 面板背景
+$cm-text: #1f2937; // 主文字
+$cm-text-secondary: #6b7280; // 次要文字
+$cm-text-placeholder: #9ca3af; // 占位文字
+$cm-border: #e5e7eb; // 常规边框
+$cm-border-light: #f3f4f6; // 更浅的分隔线
+$cm-hover-bg: #f3f4f6; // hover 背景
+
+// 功能色（成色标签用）
+$cm-blue: #3b82f6;
+$cm-blue-50: #eff6ff;
+$cm-gray-tag: #6b7280;
+$cm-gray-tag-50: #f3f4f6;
+$cm-danger: #ef4444;
+
+// ------------------------------------------------------------------ 渐变
+// 规范：渐变只用在两处，其余一律纯色，避免渐变滥用
+$cm-gradient-brand: linear-gradient(135deg, $cm-primary-dark 0%, $cm-primary 45%, $cm-primary-light 100%);
+$cm-gradient-buy: linear-gradient(135deg, $cm-accent 0%, $cm-accent-light 100%);
+$cm-gradient-topbar: linear-gradient(90deg, $cm-primary-dark 0%, $cm-primary 40%, $cm-primary-light 75%, #a7f3d0 100%);
+
+// ------------------------------------------------------------------ 圆角 / 阴影 / 间距
+$cm-radius-sm: 6px;
+$cm-radius: 8px;
+$cm-radius-card: 12px; // 卡片统一圆角
+$cm-radius-lg: 16px;
+$cm-radius-pill: 999px;
+
+$cm-shadow-card: 0 2px 12px rgba(0, 0, 0, 0.08); // 卡片柔和阴影
+$cm-shadow-card-hover: 0 8px 24px rgba(16, 185, 129, 0.16); // hover 时带一点品牌绿
+$cm-shadow-panel: 0 8px 32px rgba(17, 24, 39, 0.08);
+$cm-shadow-buy: 0 4px 14px rgba(245, 158, 11, 0.35);
+
+$cm-header-height: 64px;
+$cm-sidebar-width: 200px;
+
+// ------------------------------------------------------------------ 断点
+$cm-bp-lg: 1200px;
+$cm-bp-md: 992px;
+$cm-bp-sm: 768px;
+
+// =============================================================================
+//  混入
+// =============================================================================
+
+/// 标准卡片：白底 + 12px 圆角 + 柔和阴影
+@mixin cm-card($radius: $cm-radius-card) {
+  background: $cm-surface;
+  border-radius: $radius;
+  box-shadow: $cm-shadow-card;
+}
+
+/// hover 上浮 4px（卡片交互的统一语言）
+@mixin cm-hover-lift($lift: -4px) {
+  transition:
+    transform 0.22s ease,
+    box-shadow 0.22s ease;
+
+  &:hover {
+    transform: translateY($lift);
+    box-shadow: $cm-shadow-card-hover;
+  }
+}
+
+/// 单行省略
+@mixin cm-ellipsis {
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+/// 多行省略
+@mixin cm-ellipsis-lines($lines: 2) {
+  display: -webkit-box;
+  -webkit-line-clamp: $lines;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+
+/// flex 居中
+@mixin cm-center {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+/// 价格排版：¥ 小一号 + 数字大号加粗 + 橙色
+@mixin cm-price($size: 20px) {
+  color: $cm-accent;
+  font-weight: 700;
+  font-size: $size;
+  line-height: 1.1;
+  letter-spacing: -0.02em;
+}
+
+/// 响应式：小于断点则应用（移动/窄屏兜底，答辩一般用宽屏）
+@mixin cm-max($bp) {
+  @media (max-width: $bp) {
+    @content;
+  }
+}

@@ -1,0 +1,2514 @@
+###############################################################################
+#  校园二手交易平台 · 端到端验收脚本
+#  对应 PROJECT_CONTEXT.md (V26) 第 6 章「验收标准与关键接口测试用例」
+#
+#  文件位置：项目根目录  C:\Users\chen\Desktop\rwuru\api-tests.http
+#  IDEA 中打开：双击文件 → 右上角选择运行环境 → 逐条点请求左侧的 ▶
+#
+#  ─────────────────────────── 执行前必读 ───────────────────────────
+#  1. 必须【先执行 0.0 环境自检】。它会写入 {{base}} 与本次运行的唯一后缀 {{run}}，
+#     没有它后面所有请求的 {{base}} 都解析不了。
+#  2. 变量串联链路（全部由响应处理器里的 client.global.set 自动完成，无需手工复制）：
+#       注册 → userId → 登录 → token → 发布商品 → productId → 下单 → orderId
+#  3. 【有 1 处必须手工执行 SQL】：把 admin 提权为 role=1（见 §1.2 的 GATE）。
+#     没有管理员账号是数据库里的事实（tb_user 无 seed），不执行则 §7 全部返回 403。
+#  4. 【破坏性用例集中在 §8】，会锁账号 15 分钟、锁 IP 30 分钟，务必最后跑。
+#  5. JacksonConfig 把【所有 Long 都序列化成 JSON 字符串】，所以 id/total/count 在
+#     响应里是 "123" 而不是 123。本脚本已按此处理，你自己加断言时请注意。
+#  6. 业务失败也是 HTTP 200，只有未登录/Token 失效是 HTTP 401。
+#  7. 【401 文案分两类】都是 HTTP 401，前端只需判断 code === 401：
+#       未携带凭证（无 Authorization 头 / 非 Bearer / Token 为空） → msg="请先登录"
+#       携带但不可用（登出黑名单 / 已过期 / 签名被篡改 / payload 缺字段） → msg="登录已失效，请重新登录"
+#     覆盖用例：0.2(请先登录) / 2.3(登录已失效) / 2.7(登录已失效) / 2.12(登录已失效) / 2.13(登录已失效)
+#  8. 【两个重点回归点】历史缺陷已修复，断言专门针对它们设计：
+#       3.20   AI 检索 ?query= 必须真正映射到 keyword（曾因参数名不匹配被静默忽略，
+#              导致 LIKE 条件整段跳过、返回全部上架商品）；3.20b 用负向对照锁死该行为。
+#       3.15   编辑重审：1-上架中 改关键字段 → 必须回到 3-待审核（3.15e），
+#              只改非关键字段 → 必须保持 1（3.15h）。此前用例编辑的是本就处于 3 的商品，等于没测。
+###############################################################################
+
+
+###############################################################################
+# §0  环境自检
+###############################################################################
+
+### 0.0 【必先执行】初始化变量 + 健康检查
+# 说明：本请求负责写入 {{base}} 和 {{run}}（本次运行的唯一后缀，保证脚本可重复执行）。
+#       run 用时间戳后 8 位，使 seller{{run}} / buyer{{run}} 等账号每次运行都不冲突。
+# @name health
+GET http://127.0.0.1:8080/actuator/health
+
+> {%
+    var suffix = String(Date.now()).slice(-8);
+
+    client.global.set("base", "http://127.0.0.1:8080/api/v1");
+    client.global.set("run", suffix);
+    client.global.set("pwd", "Passw0rd!2024");          // 8-20 位 + 字母 + 数字 + 特殊字符
+    client.global.set("pwd_new", "NewPassw0rd!2024");
+
+    client.global.set("seller_user", "seller" + suffix);
+    client.global.set("seller_email", "seller" + suffix + "@stu.edu.cn");
+    client.global.set("buyer_user", "buyer" + suffix);
+    client.global.set("buyer_email", "buyer" + suffix + "@stu.edu.cn");
+    client.global.set("admin_user", "admin" + suffix);
+    client.global.set("admin_email", "admin" + suffix + "@stu.edu.cn");
+    client.global.set("pwtest_user", "pwtest" + suffix);
+    client.global.set("pwtest_email", "pwtest" + suffix + "@stu.edu.cn");
+    client.global.set("locktest_user", "locktest" + suffix);
+    client.global.set("locktest_email", "locktest" + suffix + "@stu.edu.cn");
+
+    client.test("0.0 健康检查：/actuator/health 完全公开且 UP", function () {
+        client.assert(response.status === 200, "HTTP 应为 200，实际 " + response.status);
+        client.assert(response.body.status === "UP", "status 应为 UP，实际 " + response.body.status);
+    });
+%}
+
+
+### 0.1 knife4j 接口文档可访问（验证白名单没误伤文档路径）
+# 预期：HTTP 200，返回 HTML。若 401 说明 PathConstants.PUBLIC_PATHS 有问题。
+GET http://127.0.0.1:8080/doc.html
+
+> {%
+    client.test("0.1 knife4j 文档页公开可访问", function () {
+        client.assert(response.status === 200, "HTTP 应为 200，实际 " + response.status);
+    });
+%}
+
+
+### 0.2 未登录访问受保护接口（对应 §6「未登录访问」）
+# 预期：HTTP 401 + code=401 + msg="请先登录"（NOT_LOGIN 而非 UNAUTHORIZED）
+GET {{base}}/order/list
+
+> {%
+    client.test("0.2 未登录 → HTTP 401 / code 401 / msg=请先登录", function () {
+        client.assert(response.status === 401, "HTTP 应为 401，实际 " + response.status);
+        client.assert(response.body.code === 401, "code 应为 401，实际 " + response.body.code);
+        client.assert(response.body.msg === "请先登录", "msg 应为「请先登录」，实际 " + response.body.msg);
+    });
+%}
+
+
+### 0.3 可选认证路径：游客访问商品列表不报错
+# 预期：HTTP 200 + code=200（无 Token 静默放行，不是 401）
+GET {{base}}/product/list?page=1&size=10
+
+> {%
+    client.test("0.3 可选认证路径游客可访问", function () {
+        client.assert(response.status === 200, "HTTP 应为 200，实际 " + response.status);
+        client.assert(response.body.code === 200, "code 应为 200，实际 " + response.body.code);
+    });
+%}
+
+
+### 0.4 分类列表（可选认证，应有 6 条 seed 分类）
+GET {{base}}/category/list
+
+> {%
+    client.test("0.4 分类列表返回 seed 分类（初始 6 条）", function () {
+        client.assert(response.status === 200, "HTTP 应为 200");
+        // 用 >= 6 而非 == 6：§3.22 会新建临时分类，若中途中断未清理会多于 6 条
+        client.assert(response.body.data.length >= 6, "分类数应 >= 6，实际 " + response.body.data.length);
+    });
+%}
+
+
+###############################################################################
+# §1  造数据
+#     现状：tb_user / tb_product / tb_order 全为空，无任何管理员账号，必须先造。
+#     硬约束：不能购买自己发布的商品（OrderCreateService:53）→ 必须卖家/买家两个账号。
+#     硬约束：商品必须 status=1 才能下单 → 发布后是 status=3，必须先过审。
+###############################################################################
+
+### 1.1 卖家 · 获取邮箱验证码
+# email.skip=true 时验证码直接在 data.code 返回，不依赖 SMTP（答辩现场无网也能跑）
+GET {{base}}/auth/email-code?email={{seller_email}}&scene=REGISTER
+
+> {%
+    client.global.set("seller_code", response.body.data ? response.body.data.code : "");
+    client.test("1.1 卖家验证码（降级模式直接返回）", function () {
+        client.assert(response.body.code === 200, "code 应为 200，实际 " + response.body.code);
+        client.assert(response.body.data.skip === true, "skip 应为 true（EMAIL_SKIP=true）");
+        client.assert(!!response.body.data.code, "data.code 不应为空");
+    });
+%}
+
+
+### 1.2 卖家 · 注册
+POST {{base}}/auth/register
+Content-Type: application/json
+
+{
+  "username": "{{seller_user}}",
+  "password": "{{pwd}}",
+  "nickname": "验收卖家",
+  "email": "{{seller_email}}",
+  "emailCode": "{{seller_code}}"
+}
+
+> {%
+    client.global.set("seller_id", response.body.data ? response.body.data.userId : "");
+    client.test("1.2 卖家注册成功 → data.userId", function () {
+        client.assert(response.body.code === 200, "code 应为 200，实际 " + response.body.code + " / " + response.body.msg);
+        client.assert(!!response.body.data.userId, "应返回 userId");
+    });
+%}
+
+
+### 1.3 买家 · 获取邮箱验证码
+GET {{base}}/auth/email-code?email={{buyer_email}}&scene=REGISTER
+
+> {% client.global.set("buyer_code", response.body.data ? response.body.data.code : ""); %}
+
+
+### 1.4 买家 · 注册
+POST {{base}}/auth/register
+Content-Type: application/json
+
+{
+  "username": "{{buyer_user}}",
+  "password": "{{pwd}}",
+  "nickname": "验收买家",
+  "email": "{{buyer_email}}",
+  "emailCode": "{{buyer_code}}"
+}
+
+> {%
+    client.global.set("buyer_id", response.body.data ? response.body.data.userId : "");
+    client.test("1.4 买家注册成功", function () {
+        client.assert(response.body.code === 200, "code 应为 200，实际 " + response.body.code + " / " + response.body.msg);
+    });
+%}
+
+
+### 1.5 管理员 · 获取邮箱验证码
+GET {{base}}/auth/email-code?email={{admin_email}}&scene=REGISTER
+
+> {% client.global.set("admin_code", response.body.data ? response.body.data.code : ""); %}
+
+
+### 1.6 管理员 · 注册（此时 role 仍是 0，需 §1.2 GATE 提权）
+POST {{base}}/auth/register
+Content-Type: application/json
+
+{
+  "username": "{{admin_user}}",
+  "password": "{{pwd}}",
+  "nickname": "验收管理员",
+  "email": "{{admin_email}}",
+  "emailCode": "{{admin_code}}"
+}
+
+> {%
+    client.test("1.6 管理员账号注册成功（尚未提权）", function () {
+        client.assert(response.body.code === 200, "code 应为 200，实际 " + response.body.code + " / " + response.body.msg);
+    });
+%}
+
+
+### 1.7 改密专用账号 · 验证码
+GET {{base}}/auth/email-code?email={{pwtest_email}}&scene=REGISTER
+
+> {% client.global.set("pwtest_code", response.body.data ? response.body.data.code : ""); %}
+
+
+### 1.8 改密专用账号 · 注册
+POST {{base}}/auth/register
+Content-Type: application/json
+
+{
+  "username": "{{pwtest_user}}",
+  "password": "{{pwd}}",
+  "nickname": "改密测试",
+  "email": "{{pwtest_email}}",
+  "emailCode": "{{pwtest_code}}"
+}
+
+> {%
+    client.test("1.8 改密专用账号注册成功", function () {
+        client.assert(response.body.code === 200, "code 应为 200，实际 " + response.body.code + " / " + response.body.msg);
+    });
+%}
+
+
+### 1.9 锁定专用账号 · 验证码
+GET {{base}}/auth/email-code?email={{locktest_email}}&scene=REGISTER
+
+> {% client.global.set("locktest_code", response.body.data ? response.body.data.code : ""); %}
+
+
+### 1.10 锁定专用账号 · 注册
+POST {{base}}/auth/register
+Content-Type: application/json
+
+{
+  "username": "{{locktest_user}}",
+  "password": "{{pwd}}",
+  "nickname": "锁定测试",
+  "email": "{{locktest_email}}",
+  "emailCode": "{{locktest_code}}"
+}
+
+> {%
+    client.test("1.10 锁定专用账号注册成功", function () {
+        client.assert(response.body.code === 200, "code 应为 200，实际 " + response.body.code + " / " + response.body.msg);
+    });
+%}
+
+
+# =============================================================================
+#  §1.2  ★★★ 手工 SQL 闸门 GATE ★★★   —— 必须在执行 §1.3 之前完成
+# =============================================================================
+#
+#  为什么必须手工：数据库里没有任何管理员账号，DDL 只 seed 了 6 条分类。
+#  为什么用 LIKE：这样脚本重复运行时不用改 SQL（{{run}} 后缀会自动变）。
+#
+#  在 IDEA 的 Database 工具窗口（或 MySQL Workbench）里执行：
+#
+#  -- ① 提权为管理员（role 写进了 JWT，所以提权后必须重新登录才生效）
+#  UPDATE campus_market.tb_user SET role = 1 WHERE username LIKE 'admin%';
+#
+#  -- ② 确认（应看到 admin<run> 的 role=1）
+#  SELECT id, username, role, status FROM campus_market.tb_user ORDER BY id;
+#
+#  -- ③ 确认 Flyway 已迁移（应看到 V1__init.sql success=1, installed_by=campus_user）
+#  SELECT version, description, success, installed_by, installed_on
+#    FROM campus_market.flyway_schema_history;
+#
+#  ※ 若跳过本闸门：§1.11 管理员登录仍会成功，但所有 §7 管理端接口返回 403
+#    （这本身就是 §2.2 的「管理员越权」用例，可以顺带验证）。
+# =============================================================================
+
+
+### 1.11 卖家 · 登录 → 保存 seller_token
+POST {{base}}/auth/login
+Content-Type: application/json
+
+{
+  "username": "{{seller_user}}",
+  "password": "{{pwd}}"
+}
+
+> {%
+    client.global.set("seller_token", response.body.data ? response.body.data.token : "");
+    client.test("1.11 卖家登录 → token 且 role=0", function () {
+        client.assert(response.body.code === 200, "code 应为 200，实际 " + response.body.code + " / " + response.body.msg);
+        client.assert(response.body.data.role === 0, "卖家 role 应为 0，实际 " + response.body.data.role);
+    });
+%}
+
+
+### 1.12 买家 · 登录 → 保存 buyer_token
+POST {{base}}/auth/login
+Content-Type: application/json
+
+{
+  "username": "{{buyer_user}}",
+  "password": "{{pwd}}"
+}
+
+> {% client.global.set("buyer_token", response.body.data ? response.body.data.token : ""); %}
+
+
+### 1.13 管理员 · 登录 → 保存 admin_token（必须在 GATE 之后！）
+POST {{base}}/auth/login
+Content-Type: application/json
+
+{
+  "username": "{{admin_user}}",
+  "password": "{{pwd}}"
+}
+
+> {%
+    client.global.set("admin_token", response.body.data ? response.body.data.token : "");
+    client.test("1.13 管理员登录 → role=1（GATE 未执行则这里 role=0）", function () {
+        client.assert(response.body.code === 200, "code 应为 200，实际 " + response.body.code);
+        client.assert(response.body.data.role === 1, "role 应为 1；若为 0 说明 §1.2 的 UPDATE SQL 没执行或没重新登录");
+    });
+%}
+
+
+### 1.14 改密专用账号 · 登录
+POST {{base}}/auth/login
+Content-Type: application/json
+
+{
+  "username": "{{pwtest_user}}",
+  "password": "{{pwd}}"
+}
+
+> {% client.global.set("pwtest_token", response.body.data ? response.body.data.token : ""); %}
+
+
+### 1.15 卖家 · 发布商品（tradeType=3 邮寄/面交皆可）→ 落库 status=3
+POST {{base}}/product
+Authorization: Bearer {{seller_token}}
+Content-Type: application/json
+
+{
+  "categoryId": 1,
+  "title": "二手高等数学教材（第七版）",
+  "description": "九成新，无笔记无划线",
+  "price": 25.00,
+  "stock": 5,
+  "conditionLevel": 2,
+  "tradeType": 3,
+  "tradeLocation": "三教门口",
+  "imageUrls": ["/static/uploads/demo1.jpg"]
+}
+
+> {%
+    client.global.set("p_mail", response.body.data ? response.body.data.id : "");
+    client.test("1.15 发布商品 → data.id，status 应为 3", function () {
+        client.assert(response.body.code === 200, "code 应为 200，实际 " + response.body.code + " / " + response.body.msg);
+        client.assert(!!response.body.data.id, "应返回商品 id");
+    });
+%}
+
+
+### 1.16 卖家 · 发布商品（tradeType=1 仅面交，供面交状态机用例使用）
+POST {{base}}/product
+Authorization: Bearer {{seller_token}}
+Content-Type: application/json
+
+{
+  "categoryId": 2,
+  "title": "二手自行车（仅限面交）",
+  "description": "骑了一年，车况良好",
+  "price": 180.00,
+  "stock": 3,
+  "conditionLevel": 3,
+  "tradeType": 1,
+  "tradeLocation": "南门车棚",
+  "imageUrls": ["/static/uploads/demo2.jpg"]
+}
+
+> {% client.global.set("p_face", response.body.data ? response.body.data.id : ""); %}
+
+
+### 1.17 卖家 · 再发布一个【不审核】的商品（保持 status=3，供可见性用例使用）
+POST {{base}}/product
+Authorization: Bearer {{seller_token}}
+Content-Type: application/json
+
+{
+  "categoryId": 3,
+  "title": "待审核商品-可见性测试专用",
+  "description": "本商品故意不提交审核",
+  "price": 10.00,
+  "stock": 2,
+  "conditionLevel": 1,
+  "tradeType": 2,
+  "tradeLocation": "",
+  "imageUrls": ["/static/uploads/demo3.jpg"]
+}
+
+> {%
+    client.global.set("p_pending", response.body.data ? response.body.data.id : "");
+    client.test("1.17 待审核商品已创建（保持 status=3）", function () {
+        client.assert(response.body.code === 200, "code 应为 200，实际 " + response.body.code + " / " + response.body.msg);
+    });
+%}
+
+
+### 1.18 管理员 · 审核通过 p_mail（3→1，之后才可下单）
+PUT {{base}}/admin/product/audit/{{p_mail}}
+Authorization: Bearer {{admin_token}}
+Content-Type: application/json
+
+{
+  "pass": true,
+  "reason": "验收通过"
+}
+
+> {%
+    client.test("1.18 审核通过 → code=200（同时写审计 APPROVE_PRODUCT）", function () {
+        client.assert(response.body.code === 200, "code 应为 200，实际 " + response.body.code + " / " + response.body.msg);
+    });
+%}
+
+
+### 1.19 管理员 · 审核通过 p_face（3→1）
+PUT {{base}}/admin/product/audit/{{p_face}}
+Authorization: Bearer {{admin_token}}
+Content-Type: application/json
+
+{
+  "pass": true,
+  "reason": "验收通过"
+}
+
+> {%
+    client.test("1.19 面交商品审核通过", function () {
+        client.assert(response.body.code === 200, "code 应为 200，实际 " + response.body.code + " / " + response.body.msg);
+    });
+%}
+
+
+### 1.20 审计日志确认（管理员，应能看到 APPROVE_PRODUCT 记录）
+GET {{base}}/admin/audit-log/list?operationType=APPROVE_PRODUCT&page=1&size=10
+Authorization: Bearer {{admin_token}}
+
+> {%
+    client.test("1.20 审计日志已写入 APPROVE_PRODUCT", function () {
+        client.assert(response.body.code === 200, "code 应为 200，实际 " + response.body.code);
+        // total 是 long，被序列化成字符串
+        client.assert(Number(response.body.data.total) >= 2, "审计记录数应 >= 2，实际 " + response.body.data.total);
+    });
+%}
+
+
+###############################################################################
+# §2  认证与安全（非破坏性）
+###############################################################################
+
+### 2.1 登录失败 → 101
+# ⚠️ 每次执行都会累加 login:fail 计数，连续 5 次会锁账号 15 分钟。
+#    清理：redis-cli DEL login:fail:{{buyer_user}}
+POST {{base}}/auth/login
+Content-Type: application/json
+
+{
+  "username": "{{buyer_user}}",
+  "password": "WrongPassword!999"
+}
+
+> {%
+    client.test("2.1 密码错误 → HTTP 200 / code=101", function () {
+        client.assert(response.status === 200, "HTTP 应为 200（业务失败也是 200），实际 " + response.status);
+        client.assert(response.body.code === 101, "code 应为 101，实际 " + response.body.code);
+        client.assert(response.body.msg === "用户名或密码错误", "msg 不符，实际 " + response.body.msg);
+    });
+%}
+
+
+### 2.2 管理员越权：普通用户访问管理端 → 403
+GET {{base}}/admin/user/list?page=1&size=10
+Authorization: Bearer {{seller_token}}
+
+> {%
+    client.test("2.2 普通用户访问管理端 → code=403", function () {
+        client.assert(response.status === 200, "HTTP 应为 200，实际 " + response.status);
+        client.assert(response.body.code === 403, "code 应为 403，实际 " + response.body.code);
+        client.assert(response.body.msg === "无权限访问", "msg 不符，实际 " + response.body.msg);
+    });
+%}
+
+
+### 2.3 非法/伪造 Token → HTTP 401
+GET {{base}}/user/profile
+Authorization: Bearer eyJhbGciOiJIUzI1NiJ9.fake.token
+
+> {%
+    client.test("2.3 伪造 Token → HTTP 401 / msg=登录已失效（已携带凭证但不可用）", function () {
+        client.assert(response.status === 401, "HTTP 应为 401，实际 " + response.status);
+        client.assert(response.body.code === 401, "code 应为 401，实际 " + response.body.code);
+        client.assert(response.body.msg === "登录已失效，请重新登录",
+            "msg 应为「登录已失效，请重新登录」（不是「请先登录」，因为凭证已携带），实际 " + response.body.msg);
+    });
+%}
+
+
+### 2.4 个人资料查询（password 永不返回）
+GET {{base}}/user/profile
+Authorization: Bearer {{seller_token}}
+
+> {%
+    client.test("2.4 个人资料不返回 password 字段", function () {
+        client.assert(response.body.code === 200, "code 应为 200，实际 " + response.body.code);
+        client.assert(response.body.data.password === undefined, "响应中不应出现 password 字段！");
+        client.assert(response.body.data.username === client.global.get("seller_user"), "username 不符");
+    });
+%}
+
+
+### 2.5 改密专用账号 · 获取【旧 token】（改密前的 token，用于验证失效）
+# 这里复用 §1.14 已保存的 pwtest_token
+GET {{base}}/user/profile
+Authorization: Bearer {{pwtest_token}}
+
+> {%
+    client.test("2.5 改密前 token 可用", function () {
+        client.assert(response.body.code === 200, "code 应为 200，实际 " + response.body.code);
+    });
+%}
+
+
+### 2.6 修改密码（校验旧密码，成功后 user:token:version +1）
+PUT {{base}}/user/password
+Authorization: Bearer {{pwtest_token}}
+Content-Type: application/json
+
+{
+  "oldPassword": "{{pwd}}",
+  "newPassword": "{{pwd_new}}"
+}
+
+> {%
+    client.test("2.6 改密成功 → code=200", function () {
+        client.assert(response.body.code === 200, "code 应为 200，实际 " + response.body.code + " / " + response.body.msg);
+    });
+%}
+
+
+### 2.7 ★改密后旧 Token 立即失效 → HTTP 401
+# 预期 msg="登录已失效，请重新登录"（UNAUTHORIZED）—— 这是 Token version 机制的核心验证点
+GET {{base}}/user/profile
+Authorization: Bearer {{pwtest_token}}
+
+> {%
+    client.test("2.7 改密后旧 Token → HTTP 401 / msg=登录已失效，请重新登录", function () {
+        client.assert(response.status === 401, "HTTP 应为 401，实际 " + response.status);
+        client.assert(response.body.code === 401, "code 应为 401，实际 " + response.body.code);
+        client.assert(response.body.msg === "登录已失效，请重新登录", "msg 不符，实际 " + response.body.msg);
+    });
+%}
+
+
+### 2.8 用新密码重新登录（证明改密本身是成功的，只是旧 token 失效）
+POST {{base}}/auth/login
+Content-Type: application/json
+
+{
+  "username": "{{pwtest_user}}",
+  "password": "{{pwd_new}}"
+}
+
+> {%
+    client.global.set("pwtest_token2", response.body.data ? response.body.data.token : "");
+    client.test("2.8 新密码可登录，并保存改密后的新 token", function () {
+        client.assert(response.body.code === 200, "code 应为 200，实际 " + response.body.code + " / " + response.body.msg);
+        client.assert(!!response.body.data.token, "应返回新 token");
+    });
+%}
+
+
+### 2.9 新密码不能与旧密码相同（用 2.8 刚拿到的新 token）
+PUT {{base}}/user/password
+Authorization: Bearer {{pwtest_token2}}
+Content-Type: application/json
+
+{
+  "oldPassword": "{{pwd_new}}",
+  "newPassword": "{{pwd_new}}"
+}
+
+> {%
+    client.test("2.9 新旧密码相同 → code=100 / msg=新密码不能与旧密码相同", function () {
+        client.assert(response.body.code === 100, "code 应为 100，实际 " + response.body.code + " / " + response.body.msg);
+        client.assert(response.body.msg === "新密码不能与旧密码相同", "msg 不符，实际 " + response.body.msg);
+    });
+%}
+
+
+### 2.10 ★他人改密不影响我的 Token（隔离性验证）
+GET {{base}}/user/profile
+Authorization: Bearer {{seller_token}}
+
+> {%
+    client.test("2.10 其他用户改密后，卖家 Token 仍有效", function () {
+        client.assert(response.status === 200, "HTTP 应为 200，实际 " + response.status);
+        client.assert(response.body.code === 200, "code 应为 200，实际 " + response.body.code);
+    });
+%}
+
+
+### 2.11 退出登录（单 Token 黑名单）
+POST {{base}}/auth/logout
+Authorization: Bearer {{seller_token}}
+
+> {%
+    client.test("2.11 退出登录 → code=200", function () {
+        client.assert(response.body.code === 200, "code 应为 200，实际 " + response.body.code);
+    });
+%}
+
+
+### 2.12 退出后该 Token 立即失效 → HTTP 401
+# 契约：登出属于「携带了凭证但已失效」→ msg 应为「登录已失效，请重新登录」
+GET {{base}}/user/profile
+Authorization: Bearer {{seller_token}}
+
+> {%
+    client.test("2.12 已登出 Token → HTTP 401 / code=401 / msg=登录已失效（jwt:blacklist 生效）", function () {
+        client.assert(response.status === 401, "HTTP 应为 401，实际 " + response.status);
+        client.assert(response.body.code === 401, "code 应为 401，实际 " + response.body.code);
+        client.assert(response.body.msg === "登录已失效，请重新登录",
+            "登出后应返回「登录已失效，请重新登录」（而非「请先登录」），实际 " + response.body.msg);
+    });
+%}
+
+
+### 2.13 ★JWT 已过期 Token → HTTP 401 / msg=登录已失效  【AuthInterceptor 修复回归点】
+# 背景：JwtUtils#parseToken 把 ExpiredJwtException 一起吞掉返回 null，
+#       所以必须靠 hasCredential() 判断才能把「过期」与「完全没带凭证」区分开。
+# 本用例的 token 是【签名有效但已过期】的（用 application.yml 的 dev 默认密钥签发，
+# exp = 2026-09-16 00:06:51，永久处于过去，可长期作为固定测试夹具）。
+# 若你注入了自定义 JWT_SECRET，签名校验会失败——但它同样落在
+# 「已携带凭证但不可用」分支，断言依然成立。
+GET {{base}}/user/profile
+Authorization: Bearer eyJhbGciOiJIUzM4NCJ9.eyJpc3MiOiJjYW1wdXMtbWFya2V0Iiwic3ViIjoiMSIsInVzZXJJZCI6MSwicm9sZSI6MCwidmVyc2lvbiI6MSwiaWF0IjoxNzg5NDgxMjExLCJleHAiOjE3ODk0ODg0MTF9.bIy0xkw2PszMLRzmhyw9BP8CDRJQwe8jmHB18eFr4ksd6WLaRcWMKA4fJBV0cb1F
+
+> {%
+    client.test("2.13 已过期 Token → HTTP 401 / code=401 / msg=登录已失效", function () {
+        client.assert(response.status === 401, "HTTP 应为 401，实际 " + response.status);
+        client.assert(response.body.code === 401, "code 应为 401，实际 " + response.body.code);
+        client.assert(response.body.msg === "登录已失效，请重新登录",
+            "过期应返回「登录已失效，请重新登录」（最关键的回归点），实际 " + response.body.msg);
+    });
+%}
+
+
+### 2.14 卖家重新登录（恢复 seller_token，后面的商品/订单用例都要用）
+POST {{base}}/auth/login
+Content-Type: application/json
+
+{
+  "username": "{{seller_user}}",
+  "password": "{{pwd}}"
+}
+
+> {%
+    client.global.set("seller_token", response.body.data ? response.body.data.token : "");
+    client.test("2.14 卖家重新登录成功，seller_token 已刷新", function () {
+        client.assert(response.body.code === 200, "code 应为 200，实际 " + response.body.code);
+    });
+%}
+
+
+###############################################################################
+# §3  商品：可见性分级 / 参数校验 / 上下架 / 分类 / 收藏 / AI 检索
+###############################################################################
+
+### 3.1 ★游客看【待审核】商品详情 → 204
+GET {{base}}/product/detail/{{p_pending}}
+
+> {%
+    client.test("3.1 游客看 status=3 商品 → code=204", function () {
+        client.assert(response.body.code === 204, "code 应为 204，实际 " + response.body.code);
+        client.assert(response.body.msg === "商品不存在或已下架", "msg 不符，实际 " + response.body.msg);
+    });
+%}
+
+
+### 3.2 ★卖家看【自己】的待审核商品 → 200（必须成功）
+GET {{base}}/product/detail/{{p_pending}}
+Authorization: Bearer {{seller_token}}
+
+> {%
+    client.test("3.2 卖家看自己的待审核商品 → code=200", function () {
+        client.assert(response.body.code === 200, "code 应为 200，实际 " + response.body.code + " / " + response.body.msg);
+        client.assert(response.body.data.title.indexOf("待审核商品") >= 0, "应返回商品信息");
+    });
+%}
+
+
+### 3.3 ★买家看【他人】的待审核商品 → 204（禁止查看 status=3）
+GET {{base}}/product/detail/{{p_pending}}
+Authorization: Bearer {{buyer_token}}
+
+> {%
+    client.test("3.3 买家看他人待审核商品 → code=204", function () {
+        client.assert(response.body.code === 204, "code 应为 204，实际 " + response.body.code);
+    });
+%}
+
+
+### 3.4 管理员看任意状态商品 → 200
+GET {{base}}/product/detail/{{p_pending}}
+Authorization: Bearer {{admin_token}}
+
+> {%
+    client.test("3.4 管理员可见全部状态 → code=200", function () {
+        client.assert(response.body.code === 200, "code 应为 200，实际 " + response.body.code);
+    });
+%}
+
+
+### 3.5 游客看已上架商品详情 → 200
+GET {{base}}/product/detail/{{p_mail}}
+
+> {%
+    client.test("3.5 游客看上架商品 → code=200", function () {
+        client.assert(response.body.code === 200, "code 应为 200，实际 " + response.body.code);
+    });
+%}
+
+
+### 3.6 分页 size 过大 → 100
+GET {{base}}/product/list?page=1&size=10000
+
+> {%
+    client.test("3.6 size=10000 → code=100 / msg=分页大小不能超过100", function () {
+        client.assert(response.body.code === 100, "code 应为 100，实际 " + response.body.code);
+        client.assert(response.body.msg === "分页大小不能超过100", "msg 不符，实际 " + response.body.msg);
+    });
+%}
+
+
+### 3.7 页码为 0 → 100
+GET {{base}}/product/list?page=0&size=10
+
+> {%
+    client.test("3.7 page=0 → code=100 / msg=页码必须大于0", function () {
+        client.assert(response.body.code === 100, "code 应为 100，实际 " + response.body.code);
+    });
+%}
+
+
+### 3.8 排序字段非法 → 100
+GET {{base}}/product/list?sortBy=illegal&page=1&size=10
+
+> {%
+    client.test("3.8 sortBy 非法 → code=100 / msg=排序字段仅支持 price 或 create_time", function () {
+        client.assert(response.body.code === 100, "code 应为 100，实际 " + response.body.code);
+        client.assert(response.body.msg === "排序字段仅支持 price 或 create_time", "msg 不符，实际 " + response.body.msg);
+    });
+%}
+
+
+### 3.9 价格区间颠倒 → 100
+GET {{base}}/product/list?minPrice=100&maxPrice=10&page=1&size=10
+
+> {%
+    client.test("3.9 minPrice>maxPrice → code=100 / msg=最低价格不能大于最高价格", function () {
+        client.assert(response.body.code === 100, "code 应为 100，实际 " + response.body.code);
+        client.assert(response.body.msg === "最低价格不能大于最高价格", "msg 不符，实际 " + response.body.msg);
+    });
+%}
+
+
+### 3.10 价格排序 + 分类过滤（正常查询）
+GET {{base}}/product/list?categoryId=1&sortBy=price&order=asc&page=1&size=10
+
+> {%
+    client.test("3.10 条件检索正常返回", function () {
+        client.assert(response.body.code === 200, "code 应为 200，实际 " + response.body.code);
+    });
+%}
+
+
+### 3.11 商品列表不得泄露卖家 phone / email（隐私校验）
+GET {{base}}/product/list?page=1&size=10
+
+> {%
+    client.test("3.11 列表 VO 必须剔除卖家 phone/email", function () {
+        client.assert(response.body.code === 200, "code 应为 200");
+        var records = response.body.data.records || [];
+        records.forEach(function (r) {
+            client.assert(r.phone === undefined, "商品列表不应出现 phone 字段！");
+            client.assert(r.email === undefined, "商品列表不应出现 email 字段！");
+        });
+    });
+%}
+
+
+### 3.12 发布商品 price=0 → 100
+POST {{base}}/product
+Authorization: Bearer {{seller_token}}
+Content-Type: application/json
+
+{
+  "categoryId": 1,
+  "title": "非法价格商品",
+  "description": "price=0 应被拒",
+  "price": 0,
+  "stock": 1,
+  "conditionLevel": 1,
+  "tradeType": 1,
+  "tradeLocation": "test",
+  "imageUrls": ["/static/uploads/x.jpg"]
+}
+
+> {%
+    client.test("3.12 price=0 → code=100 / msg=商品价格必须大于0", function () {
+        client.assert(response.body.code === 100, "code 应为 100，实际 " + response.body.code);
+        client.assert(response.body.msg === "商品价格必须大于0", "msg 不符，实际 " + response.body.msg);
+    });
+%}
+
+
+### 3.13 商品图片 10 张（超 9 张上限）→ 100
+POST {{base}}/product
+Authorization: Bearer {{seller_token}}
+Content-Type: application/json
+
+{
+  "categoryId": 1,
+  "title": "图片超限商品",
+  "description": "10 张图应被拒",
+  "price": 10.00,
+  "stock": 1,
+  "conditionLevel": 1,
+  "tradeType": 1,
+  "tradeLocation": "test",
+  "imageUrls": ["1.jpg","2.jpg","3.jpg","4.jpg","5.jpg","6.jpg","7.jpg","8.jpg","9.jpg","10.jpg"]
+}
+
+> {%
+    client.test("3.13 图片 10 张 → code=100 / msg=商品图片最多9张", function () {
+        client.assert(response.body.code === 100, "code 应为 100，实际 " + response.body.code);
+        client.assert(response.body.msg === "商品图片最多9张", "msg 不符，实际 " + response.body.msg);
+    });
+%}
+
+
+### 3.14 我的商品（卖家视角，应含 status=3 待审核）
+GET {{base}}/product/my?page=1&size=10
+Authorization: Bearer {{seller_token}}
+
+> {%
+    client.test("3.14 我的商品含待审核商品", function () {
+        client.assert(response.body.code === 200, "code 应为 200，实际 " + response.body.code);
+        client.assert(Number(response.body.data.total) >= 3, "应有 >=3 个商品，实际 " + response.body.data.total);
+    });
+%}
+
+
+### 3.15 ★编辑重审：status=1 上架中，改【关键字段】必须重置为 3-待审核
+# 为什么另起一个商品：p_pending 本来就是 status=3，改完还是 3，
+# 即使重审逻辑完全失效断言也会通过 —— 那样等于没测。这里用专用商品 p_reaudit
+# 完整走一遍：发布(3) → 审核通过(1) → 改 title → 断言回到 3。
+
+### 3.15a 卖家发布「重审测试商品」→ 落库 status=3
+POST {{base}}/product
+Authorization: Bearer {{seller_token}}
+Content-Type: application/json
+
+{
+  "categoryId": 5,
+  "title": "重审测试商品-初始标题",
+  "description": "用于验证 1→3 重审逻辑",
+  "price": 66.00,
+  "stock": 4,
+  "conditionLevel": 2,
+  "tradeType": 1,
+  "tradeLocation": "初始地点",
+  "imageUrls": ["/static/uploads/reaudit.jpg"]
+}
+
+> {%
+    client.global.set("p_reaudit", response.body.data ? response.body.data.id : "");
+    client.test("3.15a 重审测试商品已发布（status=3）", function () {
+        client.assert(response.body.code === 200, "code 应为 200，实际 " + response.body.code + " / " + response.body.msg);
+        client.assert(!!response.body.data.id, "应返回商品 id");
+    });
+%}
+
+
+### 3.15b 管理员审核通过 → status 3→1
+PUT {{base}}/admin/product/audit/{{p_reaudit}}
+Authorization: Bearer {{admin_token}}
+Content-Type: application/json
+
+{
+  "pass": true,
+  "reason": "重审用例前置：先上架"
+}
+
+> {%
+    client.test("3.15b 审核通过 → code=200", function () {
+        client.assert(response.body.code === 200, "code 应为 200，实际 " + response.body.code + " / " + response.body.msg);
+    });
+%}
+
+
+### 3.15c 确认此刻确为 status=1（否则下面的重审断言无意义）
+GET {{base}}/product/detail/{{p_reaudit}}
+Authorization: Bearer {{seller_token}}
+
+> {%
+    client.test("3.15c 前置确认：商品当前 status=1 上架中", function () {
+        client.assert(response.body.code === 200, "code 应为 200，实际 " + response.body.code);
+        client.assert(response.body.data.status === 1,
+            "前置条件不满足：编辑前 status 应为 1，实际 " + response.body.data.status);
+    });
+%}
+
+
+### 3.15d 卖家修改 title（关键字段 → 应触发重新审核）
+PUT {{base}}/product/{{p_reaudit}}
+Authorization: Bearer {{seller_token}}
+Content-Type: application/json
+
+{
+  "categoryId": 5,
+  "title": "重审测试商品-已改标题",
+  "description": "用于验证 1→3 重审逻辑",
+  "price": 66.00,
+  "stock": 4,
+  "conditionLevel": 2,
+  "tradeType": 1,
+  "tradeLocation": "初始地点",
+  "imageUrls": ["/static/uploads/reaudit.jpg"]
+}
+
+> {%
+    client.test("3.15d 编辑关键字段 → code=200", function () {
+        client.assert(response.body.code === 200, "code 应为 200，实际 " + response.body.code + " / " + response.body.msg);
+    });
+%}
+
+
+### 3.15e ★核心断言：status 必须已重置为 3-待审核
+# 若这里拿到 1，说明 resolveStatus() 的关键字段判定失效，重审逻辑漏了
+GET {{base}}/product/detail/{{p_reaudit}}
+Authorization: Bearer {{seller_token}}
+
+> {%
+    client.test("3.15e 改关键字段后 status 重置为 3（重新审核）", function () {
+        client.assert(response.body.code === 200, "code 应为 200，实际 " + response.body.code);
+        client.assert(response.body.data.status === 3,
+            "关键字段(title)变更后 status 应为 3-待审核，实际 " + response.body.data.status
+            + "（若为 1 说明重审逻辑未生效）");
+        client.assert(response.body.data.title === "重审测试商品-已改标题", "标题应已更新");
+    });
+%}
+
+
+### 3.15f 管理员再次审核通过 → status 回到 1，用于验证「非关键字段」分支
+PUT {{base}}/admin/product/audit/{{p_reaudit}}
+Authorization: Bearer {{admin_token}}
+Content-Type: application/json
+
+{
+  "pass": true,
+  "reason": "重审用例前置：再次上架"
+}
+
+> {%
+    client.test("3.15f 再次审核通过 → code=200", function () {
+        client.assert(response.body.code === 200, "code 应为 200，实际 " + response.body.code + " / " + response.body.msg);
+    });
+%}
+
+
+### 3.15g 卖家只改 tradeLocation（非关键字段），其余字段保持与库中完全一致
+# 注意：ProductSaveRequest 是全量更新语义，其余字段必须原样回传，
+#       否则会被 isCriticalChanged 判定为关键字段变更，测不出这个分支。
+PUT {{base}}/product/{{p_reaudit}}
+Authorization: Bearer {{seller_token}}
+Content-Type: application/json
+
+{
+  "categoryId": 5,
+  "title": "重审测试商品-已改标题",
+  "description": "用于验证 1→3 重审逻辑",
+  "price": 66.00,
+  "stock": 4,
+  "conditionLevel": 2,
+  "tradeType": 1,
+  "tradeLocation": "图书馆门口",
+  "imageUrls": ["/static/uploads/reaudit.jpg"]
+}
+
+> {%
+    client.test("3.15g 仅改非关键字段 → code=200", function () {
+        client.assert(response.body.code === 200, "code 应为 200，实际 " + response.body.code + " / " + response.body.msg);
+    });
+%}
+
+
+### 3.15h ★核心断言：只改非关键字段时 status 应保持 1（不触发重审）
+GET {{base}}/product/detail/{{p_reaudit}}
+Authorization: Bearer {{seller_token}}
+
+> {%
+    client.test("3.15h 仅改 tradeLocation 后 status 保持 1（非关键字段直接生效）", function () {
+        client.assert(response.body.code === 200, "code 应为 200，实际 " + response.body.code);
+        client.assert(response.body.data.status === 1,
+            "非关键字段变更后 status 应保持 1-上架中，实际 " + response.body.data.status
+            + "（若为 3 说明 isCriticalChanged 误判了非关键字段）");
+        client.assert(response.body.data.tradeLocation === "图书馆门口", "tradeLocation 应已更新");
+    });
+%}
+
+
+### 3.16 收藏商品（买家收藏 p_mail）
+POST {{base}}/favorite/{{p_mail}}
+Authorization: Bearer {{buyer_token}}
+
+> {%
+    client.test("3.16 收藏成功", function () {
+        client.assert(response.body.code === 200, "code 应为 200，实际 " + response.body.code);
+    });
+%}
+
+
+### 3.17 重复收藏应幂等 → 200
+POST {{base}}/favorite/{{p_mail}}
+Authorization: Bearer {{buyer_token}}
+
+> {%
+    client.test("3.17 重复收藏幂等 → code=200", function () {
+        client.assert(response.body.code === 200, "code 应为 200，实际 " + response.body.code);
+    });
+%}
+
+
+### 3.18 是否已收藏 → true
+GET {{base}}/favorite/check/{{p_mail}}
+Authorization: Bearer {{buyer_token}}
+
+> {%
+    client.test("3.18 已收藏 → favorited=true", function () {
+        client.assert(response.body.data.favorited === true, "favorited 应为 true");
+    });
+%}
+
+
+### 3.19 收藏列表（应含 productStatus / isDeleted 字段供前端标注失效）
+GET {{base}}/favorite/list?page=1&size=10
+Authorization: Bearer {{buyer_token}}
+
+> {%
+    client.test("3.19 收藏列表返回商品当前状态字段", function () {
+        client.assert(response.body.code === 200, "code 应为 200，实际 " + response.body.code);
+        var records = response.body.data.records || [];
+        client.assert(records.length >= 1, "应至少有 1 条收藏");
+        client.assert(records[0].productStatus !== undefined, "应返回 productStatus");
+    });
+%}
+
+
+### 3.20 ★AI 检索：?query= 必须真正生效（关键词过滤）  【历史缺陷回归点】
+# 契约：GET /api/v1/ai/search?query=自然语言（PROJECT_CONTEXT 第 4 章 / SPEC 8.1）
+#
+# 历史缺陷：AiSearchController 曾只做 `search(@Valid ProductQuery query)` 绑定，
+#   而 ProductQuery 里【没有】query 属性 → ?query=教材 被 Spring 静默忽略 →
+#   keyword=null → AiSearchServiceImpl 的
+#   `.and(keyword != null && !keyword.isBlank(), ...)` 整段 LIKE 被跳过 →
+#   接口退化成"返回全部上架商品"（于是把「二手自行车」也返回了），且不报任何错。
+#
+# 3.20a 正向：关键字应命中，且不含该关键字的商品不得出现
+GET {{base}}/ai/search?query=教材&page=1&size=20
+
+> {%
+    client.test("3.20a ?query=教材 命中且不含关键字的商品被排除", function () {
+        client.assert(response.body.code === 200, "code 应为 200，实际 " + response.body.code + " / " + response.body.msg);
+        var recs = (response.body.data && response.body.data.records) || [];
+        var titles = recs.map(function (r) { return r.title; });
+        client.log("3.20a 命中 " + recs.length + " 条：[" + titles.join(" | ") + "]");
+
+        // ① 必须命中 p_mail（标题「二手高等数学教材（第七版）」含「教材」）
+        var hitExpected = titles.some(function (t) { return t && t.indexOf("教材") >= 0; });
+        client.assert(hitExpected, "应命中标题含「教材」的商品，实际结果：[" + titles.join(" | ") + "]");
+
+        // ② 关键回归断言：p_face 的 title「二手自行车（仅限面交）」与
+        //    description「骑了一年，车况良好」都不含「教材」，绝不能出现在结果里
+        client.assert(titles.indexOf("二手自行车（仅限面交）") < 0,
+            "返回了不含关键字「教材」的商品：二手自行车（仅限面交）——"
+            + "说明 ?query= 未被映射到 keyword，LIKE 条件被跳过了！");
+    });
+%}
+
+
+### 3.20b ★负向对照：不可能匹配的关键字 → 结果必须为 0 条
+# 这是最能抓出「条件被静默跳过」的用例：若 ?query= 再次失效，
+# 接口会返回全部上架商品，total 将 > 0，本用例立刻失败。
+GET {{base}}/ai/search?query=ZZZ绝不可能匹配的关键字ZZZ&page=1&size=20
+
+> {%
+    client.test("3.20b 无匹配关键字 → total=0（证明过滤条件确实生效）", function () {
+        client.assert(response.body.code === 200, "code 应为 200，实际 " + response.body.code);
+        // total 是 long，被 JacksonConfig 序列化成字符串
+        client.assert(Number(response.body.data.total) === 0,
+            "无匹配关键字时应返回 0 条，实际 " + response.body.data.total
+            + "（若 >0 说明 LIKE 条件被跳过，接口退化成返回全部商品）");
+    });
+%}
+
+
+### 3.21 分类下有商品时删除 → 208
+# 用分类 2（p_face 固定发布在分类 2 且从不被迁移，所以重复运行也稳定返回 208）
+DELETE {{base}}/admin/category/2
+Authorization: Bearer {{admin_token}}
+
+> {%
+    client.test("3.21 删除有商品的分类 → code=208 / msg=分类下存在商品，请先迁移", function () {
+        client.assert(response.body.code === 208, "code 应为 208，实际 " + response.body.code + " / " + response.body.msg);
+        client.assert(response.body.msg === "分类下存在商品，请先迁移", "msg 不符，实际 " + response.body.msg);
+    });
+%}
+
+
+### 3.22 新建分类 → 200 且返回 id
+POST {{base}}/admin/category
+Authorization: Bearer {{admin_token}}
+Content-Type: application/json
+
+{
+  "name": "验收临时分类{{run}}",
+  "sort": 99
+}
+
+> {%
+    client.global.set("tmp_cat", response.body.data ? response.body.data.id : "");
+    client.test("3.22 新建分类成功（同时写审计 CREATE_CATEGORY）", function () {
+        client.assert(response.body.code === 200, "code 应为 200，实际 " + response.body.code + " / " + response.body.msg);
+        client.assert(!!response.body.data.id, "应返回分类 id");
+    });
+%}
+
+
+### 3.23 分类级联迁移（把分类 1 的商品迁到分类 2）
+PUT {{base}}/admin/category/migrate
+Authorization: Bearer {{admin_token}}
+Content-Type: application/json
+
+{
+  "fromCategoryId": 1,
+  "toCategoryId": 2
+}
+
+> {%
+    client.test("3.23 分类迁移返回 movedCount", function () {
+        client.assert(response.body.code === 200, "code 应为 200，实际 " + response.body.code);
+        client.assert(response.body.data.movedCount !== undefined, "应返回 movedCount");
+    });
+%}
+
+
+### 3.24 迁移后原分类可删除 → 200
+DELETE {{base}}/admin/category/{{tmp_cat}}
+Authorization: Bearer {{admin_token}}
+
+> {%
+    client.test("3.24 删除空分类成功", function () {
+        client.assert(response.body.code === 200, "code 应为 200，实际 " + response.body.code + " / " + response.body.msg);
+    });
+%}
+
+
+###############################################################################
+# §4  订单与状态机（论文核心）
+#     重点：amount / tradeType 严禁前端传；防重 Token 一次性；
+#           所有状态变更接口靠「影响行数」判幂等（200 + 请勿重复操作 / 209）
+###############################################################################
+
+### 4.1 买家 · 获取下单防重 Token（#1）
+GET {{base}}/order/token
+Authorization: Bearer {{buyer_token}}
+
+> {%
+    client.global.set("ot1", response.body.data ? response.body.data.token : "");
+    client.test("4.1 防重 Token 获取成功", function () {
+        client.assert(response.body.code === 200, "code 应为 200，实际 " + response.body.code);
+        client.assert(!!response.body.data.token, "应返回 token");
+    });
+%}
+
+
+### 4.2 ★下单成功（邮寄，amount 由后端计算）
+# body 里故意不传 amount / tradeType：传了也无效，后端从商品读取
+POST {{base}}/order
+Authorization: Bearer {{buyer_token}}
+X-Order-Token: {{ot1}}
+Content-Type: application/json
+
+{
+  "productId": {{p_mail}},
+  "quantity": 1,
+  "address": "1号宿舍楼101室"
+}
+
+> {%
+    client.global.set("o1", response.body.data ? response.body.data.orderId : "");
+    client.test("4.2 下单成功 → code=200，后端算出 amount=25.00", function () {
+        client.assert(response.body.code === 200, "code 应为 200，实际 " + response.body.code + " / " + response.body.msg);
+        client.assert(!!response.body.data.orderId, "应返回 orderId");
+        client.assert(Number(response.body.data.amount) === 25.00, "amount 应为 product_price×quantity=25.00，实际 " + response.body.data.amount);
+        client.assert(response.body.data.status === 0, "新订单 status 应为 0（待支付）");
+    });
+%}
+
+
+### 4.3 ★重复下单（复用已被消费的 ot1）→ 202
+POST {{base}}/order
+Authorization: Bearer {{buyer_token}}
+X-Order-Token: {{ot1}}
+Content-Type: application/json
+
+{
+  "productId": {{p_mail}},
+  "quantity": 1,
+  "address": "1号宿舍楼101室"
+}
+
+> {%
+    client.test("4.3 重复下单 → code=202 / msg=请勿重复提交", function () {
+        client.assert(response.body.code === 202, "code 应为 202，实际 " + response.body.code);
+        client.assert(response.body.msg === "请勿重复提交", "msg 不符，实际 " + response.body.msg);
+    });
+%}
+
+
+### 4.4a 下单数量为 0（第1步：取防重 Token）
+GET {{base}}/order/token
+Authorization: Bearer {{buyer_token}}
+
+> {% client.global.set("ot_bad", response.body.data ? response.body.data.token : ""); %}
+
+### 4.4b 下单数量为 0（第2步：下单 → 期望 code=100 / 购买数量必须大于0）
+POST {{base}}/order
+Authorization: Bearer {{buyer_token}}
+X-Order-Token: {{ot_bad}}
+Content-Type: application/json
+
+{
+  "productId": {{p_mail}},
+  "quantity": 0,
+  "address": "1号宿舍楼101室"
+}
+
+> {%
+    client.test("4.4 quantity=0 → code=100 / msg=购买数量必须大于0", function () {
+        client.assert(response.body.code === 100, "code 应为 100，实际 " + response.body.code);
+        client.assert(response.body.msg === "购买数量必须大于0", "msg 不符，实际 " + response.body.msg);
+    });
+%}
+
+
+### 4.5a 邮寄订单缺地址（第1步：取防重 Token）
+GET {{base}}/order/token
+Authorization: Bearer {{buyer_token}}
+
+> {% client.global.set("ot_noaddr", response.body.data ? response.body.data.token : ""); %}
+
+### 4.5b 邮寄订单缺地址（第2步：下单 → 期望 code=100 / 邮寄订单收货地址不能为空）
+POST {{base}}/order
+Authorization: Bearer {{buyer_token}}
+X-Order-Token: {{ot_noaddr}}
+Content-Type: application/json
+
+{
+  "productId": {{p_mail}},
+  "quantity": 1
+}
+
+> {%
+    client.test("4.5 邮寄订单缺 address → code=100 / msg=邮寄订单收货地址不能为空", function () {
+        client.assert(response.body.code === 100, "code 应为 100，实际 " + response.body.code);
+        client.assert(response.body.msg === "邮寄订单收货地址不能为空", "msg 不符，实际 " + response.body.msg);
+    });
+%}
+
+
+### 4.6a 不能购买自己发布的商品（第1步：取防重 Token）
+# 用【卖家】的 token 买卖家自己的商品
+GET {{base}}/order/token
+Authorization: Bearer {{seller_token}}
+
+> {% client.global.set("ot_self", response.body.data ? response.body.data.token : ""); %}
+
+### 4.6b 不能购买自己发布的商品（第2步：下单 → 期望 code=100 / 不能购买自己发布的商品）
+POST {{base}}/order
+Authorization: Bearer {{seller_token}}
+X-Order-Token: {{ot_self}}
+Content-Type: application/json
+
+{
+  "productId": {{p_mail}},
+  "quantity": 1,
+  "address": "1号宿舍楼101室"
+}
+
+> {%
+    client.test("4.6 买自己的商品 → code=100 / msg=不能购买自己发布的商品", function () {
+        client.assert(response.body.code === 100, "code 应为 100，实际 " + response.body.code);
+        client.assert(response.body.msg === "不能购买自己发布的商品", "msg 不符，实际 " + response.body.msg);
+    });
+%}
+
+
+### 4.7 ★越权访问：买家 A 操作买家 B 的订单 → 203
+# 用【卖家】token 去操作【买家】的订单 o1（卖家不是该单买家，也不是管理员）
+PUT {{base}}/order/pay/{{o1}}
+Authorization: Bearer {{seller_token}}
+
+> {%
+    client.test("4.7 越权操作他人订单 → code=203 / msg=无权操作该订单", function () {
+        client.assert(response.body.code === 203, "code 应为 203，实际 " + response.body.code);
+        client.assert(response.body.msg === "无权操作该订单", "msg 不符，实际 " + response.body.msg);
+    });
+%}
+
+
+### 4.8 买家支付订单 o1（0→1）
+PUT {{base}}/order/pay/{{o1}}
+Authorization: Bearer {{buyer_token}}
+
+> {%
+    client.test("4.8 支付成功 → code=200，status=1", function () {
+        client.assert(response.body.code === 200, "code 应为 200，实际 " + response.body.code + " / " + response.body.msg);
+        client.assert(response.body.data.status === 1, "status 应为 1，实际 " + response.body.data.status);
+    });
+%}
+
+
+### 4.9 幂等：重复支付 → code=200 + msg=请勿重复操作
+PUT {{base}}/order/pay/{{o1}}
+Authorization: Bearer {{buyer_token}}
+
+> {%
+    client.test("4.9 重复支付 → code=200 / msg=请勿重复操作", function () {
+        client.assert(response.body.code === 200, "code 应为 200，实际 " + response.body.code);
+        client.assert(response.body.msg === "请勿重复操作", "msg 不符，实际 " + response.body.msg);
+    });
+%}
+
+
+### 4.10 卖家发货（1→2，仅 trade_type IN (2,3)）
+PUT {{base}}/order/ship/{{o1}}
+Authorization: Bearer {{seller_token}}
+
+> {%
+    client.test("4.10 发货成功 → status=2", function () {
+        client.assert(response.body.code === 200, "code 应为 200，实际 " + response.body.code + " / " + response.body.msg);
+        client.assert(response.body.data.status === 2, "status 应为 2，实际 " + response.body.data.status);
+    });
+%}
+
+
+### 4.11 ★状态冲突：对已发货订单再次发货 → 209
+# 注意：这里当前状态已是 2（目标状态），按幂等规则会返回 200 + 请勿重复操作。
+#       真正的 209 场景见 4.12（对已完成订单发货）。
+PUT {{base}}/order/ship/{{o1}}
+Authorization: Bearer {{seller_token}}
+
+> {%
+    client.test("4.11 重复发货 → 幂等 200/请勿重复操作", function () {
+        client.assert(response.body.code === 200 || response.body.code === 209,
+            "code 应为 200(幂等) 或 209，实际 " + response.body.code);
+    });
+%}
+
+
+### 4.12 买家确认收货（2→3）
+PUT {{base}}/order/receive/{{o1}}
+Authorization: Bearer {{buyer_token}}
+
+> {%
+    client.test("4.12 确认收货 → status=3 已完成", function () {
+        client.assert(response.body.code === 200, "code 应为 200，实际 " + response.body.code + " / " + response.body.msg);
+        client.assert(response.body.data.status === 3, "status 应为 3，实际 " + response.body.data.status);
+    });
+%}
+
+
+### 4.13 ★状态冲突：对已完成订单发货 → 209
+PUT {{base}}/order/ship/{{o1}}
+Authorization: Bearer {{seller_token}}
+
+> {%
+    client.test("4.13 已完成订单发货 → code=209 / msg=当前状态不允许此操作", function () {
+        client.assert(response.body.code === 209, "code 应为 209，实际 " + response.body.code + " / " + response.body.msg);
+        client.assert(response.body.msg === "当前状态不允许此操作", "msg 不符，实际 " + response.body.msg);
+    });
+%}
+
+
+### 4.14a 买家主动取消订单（第1步：取防重 Token）
+GET {{base}}/order/token
+Authorization: Bearer {{buyer_token}}
+
+> {% client.global.set("ot_cancel", response.body.data ? response.body.data.token : ""); %}
+
+### 4.14b 买家主动取消订单（第2步：下单构造待支付订单 O2）
+POST {{base}}/order
+Authorization: Bearer {{buyer_token}}
+X-Order-Token: {{ot_cancel}}
+Content-Type: application/json
+
+{
+  "productId": {{p_mail}},
+  "quantity": 1,
+  "address": "1号宿舍楼101室"
+}
+
+> {% client.global.set("o2", response.body.data ? response.body.data.orderId : ""); %}
+
+### 4.14c 买家主动取消订单（第3步：取消 → 期望 status=4 且库存回补）
+PUT {{base}}/order/cancel/{{o2}}
+Authorization: Bearer {{buyer_token}}
+Content-Type: application/json
+
+{
+  "reason": "验收-买家主动取消"
+}
+
+> {%
+    client.test("4.14 买家取消 → status=4 且 cancel_by=买家ID", function () {
+        client.assert(response.body.code === 200, "code 应为 200，实际 " + response.body.code + " / " + response.body.msg);
+        client.assert(response.body.data.status === 4, "status 应为 4，实际 " + response.body.data.status);
+        client.assert(String(response.body.data.cancelBy) === String(client.global.get("buyer_id")),
+            "cancelBy 应为买家ID");
+    });
+%}
+
+
+### 4.15 取消后商品库存应已回补（手工核对 SQL 见 §5）
+GET {{base}}/product/detail/{{p_mail}}
+
+> {%
+    client.test("4.15 取消后商品回到可售状态（stock>0）", function () {
+        client.assert(response.body.code === 200, "code 应为 200，实际 " + response.body.code);
+        client.assert(Number(response.body.data.stock) > 0, "库存应 > 0（已回补），实际 " + response.body.data.stock);
+    });
+%}
+
+
+### 4.16a 退款流程 O3（第1步：取防重 Token）
+GET {{base}}/order/token
+Authorization: Bearer {{buyer_token}}
+
+> {% client.global.set("ot_o3", response.body.data ? response.body.data.token : ""); %}
+
+### 4.16b 退款流程 O3（第2步：下单构造 O3）
+POST {{base}}/order
+Authorization: Bearer {{buyer_token}}
+X-Order-Token: {{ot_o3}}
+Content-Type: application/json
+
+{
+  "productId": {{p_mail}},
+  "quantity": 1,
+  "address": "1号宿舍楼101室"
+}
+
+> {% client.global.set("o3", response.body.data ? response.body.data.orderId : ""); %}
+
+### 4.16c 退款流程 O3（第3步：支付 → 期望 status=1）
+PUT {{base}}/order/pay/{{o3}}
+Authorization: Bearer {{buyer_token}}
+
+> {%
+    client.test("4.16 O3 支付成功（status=1）", function () {
+        client.assert(response.body.data.status === 1, "status 应为 1，实际 " + response.body.data.status);
+    });
+%}
+
+
+### 4.17 买家申请退款（未发货 1→6）
+POST {{base}}/order/refund/apply/{{o3}}
+Authorization: Bearer {{buyer_token}}
+Content-Type: application/json
+
+{
+  "reason": "验收-不想要了"
+}
+
+> {%
+    client.test("4.17 申请退款 → status=6 退款申请中", function () {
+        client.assert(response.body.code === 200, "code 应为 200，实际 " + response.body.code + " / " + response.body.msg);
+        client.assert(response.body.data.status === 6, "status 应为 6，实际 " + response.body.data.status);
+    });
+%}
+
+
+### 4.18 卖家同意退款（6→4 + 库存回补）
+PUT {{base}}/order/refund/agree/{{o3}}
+Authorization: Bearer {{seller_token}}
+
+> {%
+    client.test("4.18 卖家同意退款 → status=4", function () {
+        client.assert(response.body.code === 200, "code 应为 200，实际 " + response.body.code + " / " + response.body.msg);
+        client.assert(response.body.data.status === 4, "status 应为 4，实际 " + response.body.data.status);
+    });
+%}
+
+
+### 4.19a 退款流程 O4（第1步：取防重 Token）
+GET {{base}}/order/token
+Authorization: Bearer {{buyer_token}}
+
+> {% client.global.set("ot_o4", response.body.data ? response.body.data.token : ""); %}
+
+### 4.19b 退款流程 O4（第2步：下单构造 O4）
+POST {{base}}/order
+Authorization: Bearer {{buyer_token}}
+X-Order-Token: {{ot_o4}}
+Content-Type: application/json
+
+{
+  "productId": {{p_mail}},
+  "quantity": 1,
+  "address": "1号宿舍楼101室"
+}
+
+> {% client.global.set("o4", response.body.data ? response.body.data.orderId : ""); %}
+
+### 4.19c 退款流程 O4（第3步：支付 → 期望 status=1）
+PUT {{base}}/order/pay/{{o4}}
+Authorization: Bearer {{buyer_token}}
+
+### 4.19d 退款流程 O4（第4步：卖家发货 → 期望 status=2）
+PUT {{base}}/order/ship/{{o4}}
+Authorization: Bearer {{seller_token}}
+
+> {%
+    client.test("4.19 O4 已发货（status=2）", function () {
+        client.assert(response.body.data.status === 2, "status 应为 2，实际 " + response.body.data.status);
+    });
+%}
+
+
+### 4.20 买家申请退款（已发货 2→6）
+POST {{base}}/order/refund/apply/{{o4}}
+Authorization: Bearer {{buyer_token}}
+Content-Type: application/json
+
+{
+  "reason": "验收-收到货有问题"
+}
+
+> {%
+    client.test("4.20 已发货订单申请退款 → status=6", function () {
+        client.assert(response.body.data.status === 6, "status 应为 6，实际 " + response.body.data.status);
+    });
+%}
+
+
+### 4.21 卖家拒绝退款（6→7，进入 3 天申诉期）
+PUT {{base}}/order/refund/reject/{{o4}}
+Authorization: Bearer {{seller_token}}
+Content-Type: application/json
+
+{
+  "rejectReason": "验收-商品无质量问题"
+}
+
+> {%
+    client.test("4.21 卖家拒绝退款 → status=7 退款被拒", function () {
+        client.assert(response.body.code === 200, "code 应为 200，实际 " + response.body.code + " / " + response.body.msg);
+        client.assert(response.body.data.status === 7, "status 应为 7，实际 " + response.body.data.status);
+    });
+%}
+
+
+### 4.22 ★7 状态买家再操作 → 206（防止绕过申诉期）
+PUT {{base}}/order/pay/{{o4}}
+Authorization: Bearer {{buyer_token}}
+
+> {%
+    client.test("4.22 status=7 时买家操作 → code=206 / msg=退款被拒，请等待申诉结果", function () {
+        client.assert(response.body.code === 206, "code 应为 206，实际 " + response.body.code + " / " + response.body.msg);
+        client.assert(response.body.msg === "退款被拒，请等待申诉结果", "msg 不符，实际 " + response.body.msg);
+    });
+%}
+
+
+### 4.23 管理员强制退款（7→4 + 库存回补 + 审计）
+# 注意：reason 是 query 参数，不是 body！
+PUT {{base}}/admin/order/force-refund/{{o4}}?reason=验收-管理员强制退款
+Authorization: Bearer {{admin_token}}
+
+> {%
+    client.test("4.23 管理员强制退款 → code=200（status 6/7→4）", function () {
+        client.assert(response.body.code === 200, "code 应为 200，实际 " + response.body.code + " / " + response.body.msg);
+    });
+%}
+
+
+### 4.24a 面交直接完成（第1步：取防重 Token）
+GET {{base}}/order/token
+Authorization: Bearer {{buyer_token}}
+
+> {% client.global.set("ot_face", response.body.data ? response.body.data.token : ""); %}
+
+### 4.24b 面交直接完成（第2步：下单构造 O5）
+POST {{base}}/order
+Authorization: Bearer {{buyer_token}}
+X-Order-Token: {{ot_face}}
+Content-Type: application/json
+
+{
+  "productId": {{p_face}},
+  "quantity": 1
+}
+
+> {% client.global.set("o5", response.body.data ? response.body.data.orderId : ""); %}
+
+### 4.24c 面交直接完成（第3步：卖家 finish-face → 期望 0→3）
+PUT {{base}}/order/finish-face/{{o5}}
+Authorization: Bearer {{seller_token}}
+
+> {%
+    client.test("4.24 卖家面交直接完成 0→3", function () {
+        client.assert(response.body.code === 200, "code 应为 200，实际 " + response.body.code + " / " + response.body.msg);
+        client.assert(response.body.data.status === 3, "status 应为 3，实际 " + response.body.data.status);
+    });
+%}
+
+
+### 4.25a 面交直接完成越权（第1步：取防重 Token）
+GET {{base}}/order/token
+Authorization: Bearer {{buyer_token}}
+
+> {% client.global.set("ot_face2", response.body.data ? response.body.data.token : ""); %}
+
+### 4.25b 面交直接完成越权（第2步：下单构造 O6）
+POST {{base}}/order
+Authorization: Bearer {{buyer_token}}
+X-Order-Token: {{ot_face2}}
+Content-Type: application/json
+
+{
+  "productId": {{p_face}},
+  "quantity": 1
+}
+
+> {% client.global.set("o6", response.body.data ? response.body.data.orderId : ""); %}
+
+### 4.25c 面交直接完成越权（第3步：买家调用 → 期望 code=203）
+PUT {{base}}/order/finish-face/{{o6}}
+Authorization: Bearer {{buyer_token}}
+
+> {%
+    client.test("4.25 买家调面交直接完成 → code=203 / msg=无权操作该订单", function () {
+        client.assert(response.body.code === 203, "code 应为 203，实际 " + response.body.code);
+        client.assert(response.body.msg === "无权操作该订单", "msg 不符，实际 " + response.body.msg);
+    });
+%}
+
+
+### 4.26 ★面交订单发货拦截 → 209
+# O6 是 trade_type=1 且 status=0，卖家发货应被 SQL 的 trade_type IN (2,3) 拦住
+PUT {{base}}/order/ship/{{o6}}
+Authorization: Bearer {{seller_token}}
+
+> {%
+    client.test("4.26 面交订单发货 → code=209", function () {
+        client.assert(response.body.code === 209, "code 应为 209，实际 " + response.body.code + " / " + response.body.msg);
+        client.assert(response.body.msg === "当前状态不允许此操作", "msg 不符，实际 " + response.body.msg);
+    });
+%}
+
+
+### 4.27a 面交买家确认收货（第1步：买家支付 O6）
+PUT {{base}}/order/pay/{{o6}}
+Authorization: Bearer {{buyer_token}}
+
+### 4.27b 面交买家确认收货（第2步：确认收货 → 期望 1→3）
+PUT {{base}}/order/receive/{{o6}}
+Authorization: Bearer {{buyer_token}}
+
+> {%
+    client.test("4.27 面交 1→3 买家确认收货", function () {
+        client.assert(response.body.code === 200, "code 应为 200，实际 " + response.body.code + " / " + response.body.msg);
+        client.assert(response.body.data.status === 3, "status 应为 3，实际 " + response.body.data.status);
+    });
+%}
+
+
+### 4.28-0a 【前置】卖家发布面交专用商品 p_callback（与 p_face 库存解耦）
+# 为什么必须另起一个商品：p_face 的库存被 4.24/4.25 共用，跑完剩多少不可预期。
+# 一旦库存被前面用例吃掉，4.28b 会直接 204「商品不存在或已下架」，
+# 于是「支付回调幂等」这条用例永远验证不到，还会被误判成回调有问题。
+# 专用商品每次都新建，库存自给自足，4.28 不再依赖任何其他用例的副作用。
+POST {{base}}/product
+Authorization: Bearer {{seller_token}}
+Content-Type: application/json
+
+{
+  "categoryId": 2,
+  "title": "面交支付回调专用商品",
+  "description": "仅供支付回调幂等用例使用，不复用 p_face 的剩余库存",
+  "price": 99.00,
+  "stock": 5,
+  "conditionLevel": 2,
+  "tradeType": 1,
+  "tradeLocation": "东门快递柜旁",
+  "imageUrls": ["/static/uploads/demo2.jpg"]
+}
+
+> {%
+    client.global.set("p_callback", response.body.data ? response.body.data.id : "");
+    client.test("4.28-0a 面交专用商品已发布（落库 status=3，待审核）", function () {
+        client.assert(response.body.code === 200, "code 应为 200，实际 " + response.body.code + " / " + response.body.msg);
+        client.assert(!!response.body.data.id, "应返回商品 id");
+    });
+%}
+
+
+### 4.28-0b 【前置】管理员审核通过 p_callback（3→1）
+# 不审核则商品保持 status=3，下单会 204，必须过审
+PUT {{base}}/admin/product/audit/{{p_callback}}
+Authorization: Bearer {{admin_token}}
+Content-Type: application/json
+
+{
+  "pass": true,
+  "reason": "验收通过"
+}
+
+> {%
+    client.test("4.28-0b 审核通过 → code=200", function () {
+        client.assert(response.body.code === 200, "code 应为 200，实际 " + response.body.code + " / " + response.body.msg);
+    });
+%}
+
+
+### 4.28a 支付回调幂等（第1步：取防重 Token）
+# 取防重 Token，供下一步下单使用
+GET {{base}}/order/token
+Authorization: Bearer {{buyer_token}}
+
+> {% client.global.set("ot_cb", response.body.data ? response.body.data.token : ""); %}
+
+### 4.28b 支付回调幂等（第2步：下单构造 O7）
+# 用 4.28-0a 专建的 p_callback，不再依赖 p_face 的剩余库存
+POST {{base}}/order
+Authorization: Bearer {{buyer_token}}
+X-Order-Token: {{ot_cb}}
+Content-Type: application/json
+
+{
+  "productId": {{p_callback}},
+  "quantity": 1
+}
+
+> {%
+    client.global.set("o7", response.body.data ? response.body.data.orderId : "");
+    client.global.set("o7_no", response.body.data ? response.body.data.orderNo : "");
+%}
+
+### 4.28c 支付回调幂等（第3步：首次回调 → 期望 data=true）
+POST {{base}}/order/pay/callback
+Content-Type: application/json
+
+{
+  "orderNo": "{{o7_no}}",
+  "tradeNo": "TRADE-ACCEPT-001"
+}
+
+> {%
+    client.test("4.28a 首次支付回调 → data=true", function () {
+        client.assert(response.body.code === 200, "code 应为 200，实际 " + response.body.code);
+        client.assert(response.body.data === true, "首次回调 data 应为 true，实际 " + response.body.data);
+    });
+%}
+
+### 4.28d 支付回调幂等（第4步：重复回调 → 期望 data=false）
+POST {{base}}/order/pay/callback
+Content-Type: application/json
+
+{
+  "orderNo": "{{o7_no}}",
+  "tradeNo": "TRADE-ACCEPT-001"
+}
+
+> {%
+    client.test("4.28b 重复支付回调 → data=false（幂等去重）", function () {
+        client.assert(response.body.code === 200, "code 应为 200，实际 " + response.body.code);
+        client.assert(response.body.data === false, "重复回调 data 应为 false，实际 " + response.body.data);
+    });
+%}
+
+
+### 4.29 订单列表（买家视角）
+GET {{base}}/order/list?role=buyer&page=1&size=20
+Authorization: Bearer {{buyer_token}}
+
+> {%
+    client.test("4.29 买家订单列表正常", function () {
+        client.assert(response.body.code === 200, "code 应为 200，实际 " + response.body.code);
+        client.assert(Number(response.body.data.total) >= 5, "应有 >=5 个订单，实际 " + response.body.data.total);
+    });
+%}
+
+
+### 4.30 订单列表（卖家视角）
+GET {{base}}/order/list?role=seller&page=1&size=20
+Authorization: Bearer {{seller_token}}
+
+> {%
+    client.test("4.30 卖家订单列表正常", function () {
+        client.assert(response.body.code === 200, "code 应为 200，实际 " + response.body.code);
+    });
+%}
+
+
+### 4.31 订单详情（含 product_title 快照）
+GET {{base}}/order/detail/{{o1}}
+Authorization: Bearer {{buyer_token}}
+
+> {%
+    client.test("4.31 订单详情返回商品标题快照", function () {
+        client.assert(response.body.code === 200, "code 应为 200，实际 " + response.body.code);
+        client.assert(!!response.body.data.productTitle, "应有 productTitle 快照");
+    });
+%}
+
+
+### 4.32 退款申请列表（status IN 6,7）
+GET {{base}}/order/refund/list?role=buyer&page=1&size=10
+Authorization: Bearer {{buyer_token}}
+
+> {%
+    client.test("4.32 退款列表接口可用", function () {
+        client.assert(response.body.code === 200, "code 应为 200，实际 " + response.body.code);
+    });
+%}
+
+
+###############################################################################
+# §5  站内信（异步线程池 + 消费端接口 + 归属校验）
+###############################################################################
+
+### 5.1 站内信列表
+GET {{base}}/notification/list?page=1&size=20
+Authorization: Bearer {{seller_token}}
+
+> {%
+    var recs = (response.body.data && response.body.data.records) || [];
+    client.global.set("n1", recs.length > 0 ? recs[0].id : "");
+    client.log("卖家收到站内信条数：" + recs.length);
+    client.test("5.1 卖家应收到订单相关站内信（下单通知卖家）", function () {
+        client.assert(response.body.code === 200, "code 应为 200，实际 " + response.body.code);
+        client.assert(recs.length >= 1, "卖家应至少收到 1 条站内信（下单时会异步通知卖家）");
+    });
+%}
+
+
+### 5.2 未读数量（前端 30 秒轮询用）
+GET {{base}}/notification/unread-count
+Authorization: Bearer {{seller_token}}
+
+> {%
+    client.test("5.2 未读数接口可用（count 为字符串，Long→String）", function () {
+        client.assert(response.body.code === 200, "code 应为 200，实际 " + response.body.code);
+        client.assert(response.body.data.count !== undefined, "应返回 count");
+    });
+%}
+
+
+### 5.3 标记单条已读
+PUT {{base}}/notification/read/{{n1}}
+Authorization: Bearer {{seller_token}}
+
+> {%
+    client.test("5.3 标记已读成功", function () {
+        client.assert(response.body.code === 200, "code 应为 200，实际 " + response.body.code);
+    });
+%}
+
+
+### 5.4 ★归属校验：用【买家】token 标记【卖家】的通知 → 203
+PUT {{base}}/notification/read/{{n1}}
+Authorization: Bearer {{buyer_token}}
+
+> {%
+    client.test("5.4 越权标记他人通知 → code=203", function () {
+        client.assert(response.body.code === 203, "code 应为 203，实际 " + response.body.code + " / " + response.body.msg);
+    });
+%}
+
+
+### 5.5 全部标记已读
+PUT {{base}}/notification/read-all
+Authorization: Bearer {{buyer_token}}
+
+> {%
+    client.test("5.5 全部已读返回 updated", function () {
+        client.assert(response.body.code === 200, "code 应为 200，实际 " + response.body.code);
+    });
+%}
+
+
+###############################################################################
+# §6  管理端其它用例
+###############################################################################
+
+### 6.1 商品审核列表（默认 status=3）
+GET {{base}}/admin/product/audit/list?page=1&size=10
+Authorization: Bearer {{admin_token}}
+
+> {%
+    client.test("6.1 审核列表可用", function () {
+        client.assert(response.body.code === 200, "code 应为 200，实际 " + response.body.code);
+    });
+%}
+
+
+### 6.2a 审核不通过（第1步：卖家发布待审核商品）
+# 需要再发一个待审核商品来做该用例
+POST {{base}}/product
+Authorization: Bearer {{seller_token}}
+Content-Type: application/json
+
+{
+  "categoryId": 4,
+  "title": "审核不通过测试商品",
+  "description": "用于验证 3→0 与通知卖家",
+  "price": 5.00,
+  "stock": 1,
+  "conditionLevel": 4,
+  "tradeType": 1,
+  "tradeLocation": "test",
+  "imageUrls": ["/static/uploads/x.jpg"]
+}
+
+> {% client.global.set("p_reject", response.body.data ? response.body.data.id : ""); %}
+
+### 6.2b 审核不通过（第2步：pass=false → 期望 status 3→0）
+PUT {{base}}/admin/product/audit/{{p_reject}}
+Authorization: Bearer {{admin_token}}
+Content-Type: application/json
+
+{
+  "pass": false,
+  "reason": "验收-图片不清晰"
+}
+
+> {%
+    client.test("6.2 审核不通过 → code=200（status 3→0）", function () {
+        client.assert(response.body.code === 200, "code 应为 200，实际 " + response.body.code + " / " + response.body.msg);
+    });
+%}
+
+
+### 6.3 管理员强制下架
+PUT {{base}}/admin/product/force-offline/{{p_reject}}?reason=验收-违规商品
+Authorization: Bearer {{admin_token}}
+
+> {%
+    client.test("6.3 强制下架 → code=200", function () {
+        client.assert(response.body.code === 200, "code 应为 200，实际 " + response.body.code + " / " + response.body.msg);
+    });
+%}
+
+
+### 6.4 用户列表
+GET {{base}}/admin/user/list?page=1&size=20
+Authorization: Bearer {{admin_token}}
+
+> {%
+    client.test("6.4 用户列表可用", function () {
+        client.assert(response.body.code === 200, "code 应为 200，实际 " + response.body.code);
+    });
+%}
+
+
+### 6.5 全量订单查询
+GET {{base}}/admin/order/list?page=1&size=20
+Authorization: Bearer {{admin_token}}
+
+> {%
+    client.test("6.5 管理端订单查询可用", function () {
+        client.assert(response.body.code === 200, "code 应为 200，实际 " + response.body.code);
+    });
+%}
+
+
+### 6.6a 封禁用户（第1步：取防重 Token）
+# 封禁前先造一个未完成订单，验证冻结与回补
+GET {{base}}/order/token
+Authorization: Bearer {{buyer_token}}
+
+> {% client.global.set("ot_ban", response.body.data ? response.body.data.token : ""); %}
+
+### 6.6b 封禁用户（第2步：下单构造待冻结订单 O8）
+POST {{base}}/order
+Authorization: Bearer {{buyer_token}}
+X-Order-Token: {{ot_ban}}
+Content-Type: application/json
+
+{
+  "productId": {{p_mail}},
+  "quantity": 1,
+  "address": "1号宿舍楼101室"
+}
+
+> {% client.global.set("o8", response.body.data ? response.body.data.orderId : ""); %}
+
+### 6.6c 封禁用户（第3步：管理员封禁卖家 → 冻结 0/1/2/6→5 + 回补库存）
+PUT {{base}}/admin/user/ban/{{seller_id}}
+Authorization: Bearer {{admin_token}}
+
+> {%
+    client.test("6.6 封禁用户 → code=200", function () {
+        client.assert(response.body.code === 200, "code 应为 200，实际 " + response.body.code + " / " + response.body.msg);
+    });
+%}
+
+
+### 6.7 ★封禁后旧 Token 立即失效 → HTTP 401（双保险：version+1 + user:status 兜底）
+GET {{base}}/user/profile
+Authorization: Bearer {{seller_token}}
+
+> {%
+    client.test("6.7 封禁后卖家旧 Token → HTTP 401", function () {
+        client.assert(response.status === 401, "HTTP 应为 401，实际 " + response.status);
+        client.assert(response.body.code === 401, "code 应为 401，实际 " + response.body.code);
+    });
+%}
+
+
+### 6.8 被封禁用户登录 → 205
+POST {{base}}/auth/login
+Content-Type: application/json
+
+{
+  "username": "{{seller_user}}",
+  "password": "{{pwd}}"
+}
+
+> {%
+    client.test("6.8 封禁用户登录 → code=205 / msg=用户已被封禁", function () {
+        client.assert(response.body.code === 205, "code 应为 205，实际 " + response.body.code + " / " + response.body.msg);
+        client.assert(response.body.msg === "用户已被封禁", "msg 不符，实际 " + response.body.msg);
+    });
+%}
+
+
+### 6.9 冻结订单应为 status=5（可在此用 §5 的 SQL 核对）
+GET {{base}}/admin/order/list?status=5&page=1&size=20
+Authorization: Bearer {{admin_token}}
+
+> {%
+    client.test("6.9 存在被冻结订单（status=5）", function () {
+        client.assert(response.body.code === 200, "code 应为 200，实际 " + response.body.code);
+        client.log("冻结订单数：" + response.body.data.total);
+    });
+%}
+
+
+### 6.10 解冻转取消（5→4 + 库存回补）
+PUT {{base}}/admin/order/unfreeze/{{o8}}
+Authorization: Bearer {{admin_token}}
+Content-Type: application/json
+
+{
+  "target": "CANCEL"
+}
+
+> {%
+    client.test("6.10 解冻转取消 → code=200（5→4 + 回补库存）", function () {
+        client.assert(response.body.code === 200, "code 应为 200，实际 " + response.body.code + " / " + response.body.msg);
+    });
+%}
+
+
+### 6.11 非法 target 值 → 100
+PUT {{base}}/admin/order/unfreeze/{{o8}}
+Authorization: Bearer {{admin_token}}
+Content-Type: application/json
+
+{
+  "target": "cancel"
+}
+
+> {%
+    client.test("6.11 target 小写 → code=100 / msg=处理方式只能为 CANCEL 或 COMPLETE", function () {
+        client.assert(response.body.code === 100, "code 应为 100，实际 " + response.body.code + " / " + response.body.msg);
+    });
+%}
+
+
+### 6.12 解封用户（解封后订单保持 status=5，不自动恢复）
+PUT {{base}}/admin/user/unban/{{seller_id}}
+Authorization: Bearer {{admin_token}}
+
+> {%
+    client.test("6.12 解封用户 → code=200", function () {
+        client.assert(response.body.code === 200, "code 应为 200，实际 " + response.body.code + " / " + response.body.msg);
+    });
+%}
+
+
+### 6.13 审计日志全量查询（核对各操作是否都落库）
+GET {{base}}/admin/audit-log/list?page=1&size=50
+Authorization: Bearer {{admin_token}}
+
+> {%
+    client.test("6.13 审计日志包含封禁/审核/解冻等操作", function () {
+        client.assert(response.body.code === 200, "code 应为 200，实际 " + response.body.code);
+        var recs = (response.body.data && response.body.data.records) || [];
+        var types = recs.map(function (r) { return r.operationType; });
+        client.log("审计操作类型：" + types.join(", "));
+        client.assert(types.indexOf("BAN_USER") >= 0, "应有 BAN_USER 审计记录");
+        client.assert(types.indexOf("UNBAN_USER") >= 0, "应有 UNBAN_USER 审计记录");
+    });
+%}
+
+
+### 6.14 卖家重新登录（解封后）
+POST {{base}}/auth/login
+Content-Type: application/json
+
+{
+  "username": "{{seller_user}}",
+  "password": "{{pwd}}"
+}
+
+> {%
+    client.global.set("seller_token", response.body.data ? response.body.data.token : "");
+    client.test("6.14 解封后可正常登录", function () {
+        client.assert(response.body.code === 200, "code 应为 200，实际 " + response.body.code + " / " + response.body.msg);
+    });
+%}
+
+
+### 6.15-0a 【前置】卖家发布「删除拦截」专用商品 p_block（自包含，不复用 p_mail）
+# 为什么必须自建商品（真实原因不是库存耗尽）：
+#   §6.7 封禁卖家时，AdminServiceImpl.banUser 会把该卖家【所有在售商品强制下架】(1→0)，
+#   §6.12 解封只恢复用户状态，并不会把商品重新上架。
+#   所以走到 6.15 时 p_mail 早已是 status=0（下架，库存还被封禁流程回补成了满值），
+#   下单会直接 204「商品不存在或已下架」，根本造不出待支付订单，
+#   于是 6.15c 的 207「商品有未完成订单，禁止删除」永远触发不了，
+#   删除反而会成功——这是用例自身的状态假设错误，不是代码缺陷。
+# 这里在【解封之后】新建并过审一个专用商品，6.15 从此不依赖任何前序用例的残留状态。
+POST {{base}}/product
+Authorization: Bearer {{seller_token}}
+Content-Type: application/json
+
+{
+  "categoryId": 2,
+  "title": "删除拦截专用商品",
+  "description": "仅供 6.15「有未完成订单禁止删除」用例使用",
+  "price": 12.00,
+  "stock": 2,
+  "conditionLevel": 2,
+  "tradeType": 3,
+  "tradeLocation": "三教门口",
+  "imageUrls": ["/static/uploads/demo1.jpg"]
+}
+
+> {%
+    client.global.set("p_block", response.body.data ? response.body.data.id : "");
+    client.test("6.15-0a 专用商品已发布（落库 status=3，待审核）", function () {
+        client.assert(response.body.code === 200, "code 应为 200，实际 " + response.body.code + " / " + response.body.msg);
+        client.assert(!!response.body.data.id, "应返回商品 id");
+    });
+%}
+
+
+### 6.15-0b 【前置】管理员审核通过 p_block（3→1）
+# 必须过审：status≠1 时下单直接 204，本用例就造不出待支付订单
+PUT {{base}}/admin/product/audit/{{p_block}}
+Authorization: Bearer {{admin_token}}
+Content-Type: application/json
+
+{
+  "pass": true,
+  "reason": "验收通过"
+}
+
+> {%
+    client.test("6.15-0b 审核通过 → code=200", function () {
+        client.assert(response.body.code === 200, "code 应为 200，实际 " + response.body.code + " / " + response.body.msg);
+    });
+%}
+
+
+### 6.15a 删除有未完成订单的商品（第1步：取防重 Token）
+# 注意：此处必须【先造一个 status=0 的待支付订单】再删。
+# 原因："未完成订单"只认 status IN (0,1,2,6,7)，
+#      而走到 6.15 时历史订单都已被 §6.10/§4.x 处置成终态(3/4)，必须新建一单才会触发 207。
+# 下单目标是 6.15-0a 专建的 p_block，不再依赖 p_mail。
+GET {{base}}/order/token
+Authorization: Bearer {{buyer_token}}
+
+> {% client.global.set("ot_blk", response.body.data ? response.body.data.token : ""); %}
+
+### 6.15b 删除有未完成订单的商品（第2步：下单构造待支付订单 o9）
+# 建在 6.15-0a 专建的 p_block 上（status=1、有库存），必然能成功下单
+POST {{base}}/order
+Authorization: Bearer {{buyer_token}}
+X-Order-Token: {{ot_blk}}
+Content-Type: application/json
+
+{
+  "productId": {{p_block}},
+  "quantity": 1,
+  "address": "1号宿舍楼101室"
+}
+
+> {%
+    client.global.set("o9", response.body.data ? response.body.data.orderId : "");
+    client.test("6.15b 已造出待支付订单 o9（status=0）", function () {
+        client.assert(response.body.code === 200, "code 应为 200，实际 " + response.body.code + " / " + response.body.msg);
+        client.assert(response.body.data.status === 0, "status 应为 0");
+    });
+%}
+
+### 6.15c 删除有未完成订单的商品（第3步：删除 → 期望 code=207）
+# 删的是 6.15-0a 专建的 p_block：它身上有 6.15b 刚造的 status=0 订单，必须被 207 拦住
+DELETE {{base}}/product/{{p_block}}
+Authorization: Bearer {{seller_token}}
+
+> {%
+    client.test("6.15c 删除有未完成订单的商品 → code=207 / msg=商品有未完成订单，禁止删除", function () {
+        client.assert(response.body.code === 207, "code 应为 207，实际 " + response.body.code + " / " + response.body.msg);
+        client.assert(response.body.msg === "商品有未完成订单，禁止删除", "msg 不符，实际 " + response.body.msg);
+    });
+%}
+
+
+### 6.16 卖家下架自己的商品（1→0）
+PUT {{base}}/product/off-shelf/{{p_face}}
+Authorization: Bearer {{seller_token}}
+
+> {%
+    client.test("6.16 下架商品 → code=200", function () {
+        client.assert(response.body.code === 200, "code 应为 200，实际 " + response.body.code + " / " + response.body.msg);
+    });
+%}
+
+
+### 6.17 收藏列表在商品下架后仍应返回（含 productStatus 标注失效）
+GET {{base}}/favorite/list?page=1&size=10
+Authorization: Bearer {{buyer_token}}
+
+> {%
+    client.test("6.17 收藏列表不过滤已下架商品", function () {
+        client.assert(response.body.code === 200, "code 应为 200，实际 " + response.body.code);
+    });
+%}
+
+
+###############################################################################
+# §7  定时任务（需要手工 SQL 拨时间 + 等待/触发）
+#     说明：这些东西无法用纯 HTTP 触发，必须配合 SQL。
+#     超时取消 cron = 每 1 分钟（0 * * * * ?）→ 拨完时间等 1 分钟即可
+#     其余三个是每日任务，见下方说明。
+###############################################################################
+
+# ─────────────────────────────────────────────────────────────────────────────
+#  【手工 SQL】在 IDEA Database 工具窗口执行，然后回到这里发下面的验证请求
+# ─────────────────────────────────────────────────────────────────────────────
+#
+#  A. 超时取消（0→4 + 库存回补）—— 任务每分钟跑，拨完等 1 分钟
+#     UPDATE campus_market.tb_order
+#        SET create_time = NOW() - INTERVAL 16 MINUTE
+#      WHERE id = <一个 status=0 的订单ID> AND status = 0;
+#     验证：SELECT id,status,cancel_by,cancel_reason FROM campus_market.tb_order WHERE id=<该ID>;
+#           期望 status=4, cancel_by=0, cancel_reason='超时未支付自动取消'
+#
+#  B. 自动确认收货（2→3）—— cron "0 30 2 * * ?" 每日 02:30
+#     UPDATE campus_market.tb_order
+#        SET ship_time = NOW() - INTERVAL 8 DAY
+#      WHERE id = <一个 status=2 的订单ID> AND status = 2;
+#     ⚠️ 改完不会立刻触发。要当场验证，把 ScheduledTasks#autoConfirmReceive 的 cron
+#        临时改成 "0 * * * * ?" 后重启应用，验完改回来。
+#
+#  C. 收货前 24 小时提醒（站内信）—— cron "0 0 10 * * ?" 每日 10:00
+#     UPDATE campus_market.tb_order
+#        SET ship_time = NOW() - INTERVAL 156 HOUR
+#      WHERE id = <一个 status=2 的订单ID> AND status = 2;
+#     同样需要临时改 cron 为 "0 * * * * ?" 才能当场看到效果。
+#
+#  D. 退款被拒超时恢复（7→1/2）—— cron "0 0 3 * * ?" 每日 03:00
+#     UPDATE campus_market.tb_order
+#        SET refund_reject_time = NOW() - INTERVAL 4 DAY
+#      WHERE id = <一个 status=7 的订单ID> AND status = 7;
+#     期望 status 恢复为 1（未发货）或 2（已发货）。同样需要临时改 cron。
+#
+#  通用核对 SQL：
+#     SELECT id,order_no,user_id,seller_id,product_id,status,quantity,trade_type,
+#            create_time,pay_time,ship_time,finish_time,cancel_time,cancel_by,
+#            refund_apply_time,refund_reject_time
+#       FROM campus_market.tb_order ORDER BY id DESC LIMIT 20;
+#     SELECT id,title,price,stock,status,is_deleted
+#       FROM campus_market.tb_product ORDER BY id DESC LIMIT 20;
+#     SELECT id,user_id,type,biz_type,biz_id,is_read,content
+#       FROM campus_market.tb_notification ORDER BY id DESC LIMIT 20;
+#     SELECT id,operator_id,operation_type,target_type,target_id,result,detail
+#       FROM campus_market.tb_audit_log ORDER BY id DESC LIMIT 20;
+#
+#  ⚠️ ShedLock：若定时任务完全不执行，先查是否有卡住的锁
+#     SELECT * FROM campus_market.shedlock;
+#     -- 确认 lock_until 已过期；必要时清掉：
+#     DELETE FROM campus_market.shedlock WHERE name = 'cancelTimeoutOrderTask';
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+### 7.1 定时任务效果验证：管理端按状态筛选订单
+# 执行完上面 SQL 并等待后，用这个接口核对状态变化
+GET {{base}}/admin/order/list?status=4&page=1&size=20
+Authorization: Bearer {{admin_token}}
+
+> {%
+    client.test("7.1 已取消订单列表（含超时取消 cancel_by=0）", function () {
+        client.assert(response.body.code === 200, "code 应为 200，实际 " + response.body.code);
+        client.log("已取消订单数：" + response.body.data.total);
+    });
+%}
+
+
+### 7.2 定时任务提醒站内信验证：买家通知列表
+GET {{base}}/notification/list?page=1&size=20
+Authorization: Bearer {{buyer_token}}
+
+> {%
+    client.test("7.2 买家通知列表可查（自动确认收货前提醒会落在这里）", function () {
+        client.assert(response.body.code === 200, "code 应为 200，实际 " + response.body.code);
+        client.log("买家收到站内信条数：" + response.body.data.total);
+    });
+%}
+
+
+###############################################################################
+# §8  ★★★ 破坏性用例 ★★★  —— 务必最后执行！
+#     账号锁定会封 15 分钟、IP 限流会封 30 分钟，跑完你就登不进系统了。
+###############################################################################
+
+### 8.1a 验证码限流（第1步：首次取码 → 期望 200）
+# 先成功取一次
+GET {{base}}/auth/email-code?email={{locktest_email}}&scene=RESET_PASSWORD
+
+### 8.1b 验证码限流（第2步：60 秒内重复取码 → 期望 code=106）
+# 立刻再取一次（60 秒内）→ 106
+GET {{base}}/auth/email-code?email={{locktest_email}}&scene=RESET_PASSWORD
+
+> {%
+    client.test("8.1 60 秒内重复获取验证码 → code=106 / msg=发送过于频繁，请稍后重试", function () {
+        client.assert(response.body.code === 106, "code 应为 106，实际 " + response.body.code + " / " + response.body.msg);
+        client.assert(response.body.msg === "发送过于频繁，请稍后重试", "msg 不符，实际 " + response.body.msg);
+    });
+%}
+
+
+### 8.2a 验证码爆破锁定（第1步：取码 RESET_PASSWORD）
+# ⚠️ email:fail 在 1 小时内【不可重置】，重新获取验证码也不会清零。
+#    要反复测请换邮箱，或手工清理：redis-cli DEL email:fail:{{locktest_email}}
+# 第 1 次：先取验证码，再用错误验证码重置密码
+GET {{base}}/auth/email-code?email={{locktest_email}}&scene=RESET_PASSWORD
+
+### 8.2b 验证码爆破锁定（第2步：错误验证码 → 期望 code=103）
+POST {{base}}/auth/reset-password
+Content-Type: application/json
+
+{
+  "email": "{{locktest_email}}",
+  "emailCode": "000000",
+  "newPassword": "{{pwd_new}}"
+}
+
+> {%
+    client.test("8.2a 错误验证码 → code=103 / msg=验证码错误或已过期", function () {
+        client.assert(response.body.code === 103, "code 应为 103，实际 " + response.body.code + " / " + response.body.msg);
+    });
+%}
+
+### 8.2c 验证码爆破锁定（第3步：失败 5 次后再取码 → 期望 code=107）
+# 请把下面这一组「取码 + 错误重置」再手工执行 4 遍（每次间隔分别点 ▶），
+# 第 5 次失败后再点下面这个取码请求即可看到 107。
+GET {{base}}/auth/email-code?email={{locktest_email}}&scene=RESET_PASSWORD
+
+> {%
+    client.test("8.2b 失败 5 次后取码 → code=107（若仍为 200/106 说明失败次数还不够 5 次）", function () {
+        client.log("当前 code=" + response.body.code + " msg=" + response.body.msg);
+        client.assert(response.body.code === 107 || response.body.code === 200 || response.body.code === 106,
+            "预期 107（已锁定）或尚未累积够 5 次");
+    });
+%}
+
+
+### 8.3 ★账号锁定：连续 5 次错误密码 → 104（锁定 15 分钟）
+# ⚠️ 专用账号 locktest{{run}}，不会影响前面的用例。
+#    内部计数：login:fail:{{locktest_user}}，达 5 次写 login:lock:{{locktest_user}}
+# 请把下面这个请求【连续点 ▶ 共 5 次】，然后点 8.4 验证。
+POST {{base}}/auth/login
+Content-Type: application/json
+
+{
+  "username": "{{locktest_user}}",
+  "password": "WrongPassword!999"
+}
+
+> {%
+    client.log("第 N 次失败，code=" + response.body.code + " msg=" + response.body.msg);
+    client.test("8.3 错误密码 → code=101（第 5 次起变为 104）", function () {
+        client.assert(response.body.code === 101 || response.body.code === 104,
+            "code 应为 101（未达阈值）或 104（已锁定）");
+    });
+%}
+
+
+### 8.4 锁定确认：即使密码正确也应被拒 → 104
+POST {{base}}/auth/login
+Content-Type: application/json
+
+{
+  "username": "{{locktest_user}}",
+  "password": "{{pwd}}"
+}
+
+> {%
+    client.test("8.4 锁定期间正确密码也拒绝 → code=104 / msg=账号已锁定15分钟", function () {
+        client.assert(response.body.code === 104, "code 应为 104，实际 " + response.body.code + " / " + response.body.msg);
+        client.assert(response.body.msg === "账号已锁定15分钟", "msg 不符，实际 " + response.body.msg);
+    });
+%}
+
+
+### 8.5 ★IP 限流：同 IP 5 分钟内失败 20 次 → 104
+# 🔴🔴 最高危：执行后你的 IP 会被封 30 分钟，所有登录都会失败！
+#      清理命令（在锁定期内也能执行，Redis 是独立的）：
+#        redis-cli DEL login:fail:ip:127.0.0.1
+#        redis-cli DEL login:lock:ip:127.0.0.1
+#      若不知道真实 IP 键名，用：
+#        redis-cli --scan --pattern "login:*ip*"
+#      或在 redis-cli 里执行：
+#        EVAL "for _,k in ipairs(redis.call('keys','login:lock:ip:*')) do redis.call('del',k) end return 1" 0
+#
+# 把下面这个请求连续点 ▶ 20 次以上：
+POST {{base}}/auth/login
+Content-Type: application/json
+
+{
+  "username": "{{buyer_user}}",
+  "password": "WrongPassword!999"
+}
+
+> {%
+    client.log("IP 失败累积中，code=" + response.body.code + " msg=" + response.body.msg);
+    client.test("8.5 IP 失败累积（第 20 次起 → 104 IP已被临时限制）", function () {
+        client.assert(response.body.code === 101 || response.body.code === 104,
+            "code 应为 101（未达阈值）或 104（IP 已限流）");
+    });
+%}
+
+
+###############################################################################
+# §9  无法用 .http 脚本化的用例（需要写代码/JMeter）
+###############################################################################
+
+# ─────────────────────────────────────────────────────────────────────────────
+#  §6「并发抢购：1000 线程抢 1 件商品」—— 论文核心数据，必须单独实现。
+#
+#  为什么不能在这里做：HTTP Client 发不出 1000 个真正并发的请求（它是顺序执行的），
+#  而且拿不到「库存最终归零」「仅 1 单成功」这类需要原子断言的结论。
+#
+#  推荐做法（任选其一）：
+#   ① JUnit 5 + CountDownLatch + ThreadPoolExecutor（连真实 MySQL/Redis，最贴合文档要求）
+#      - 准备：上架一个 stock=1 的商品
+#      - 1000 个线程同时抢 → 期望：恰好 1 个 code=200，其余 999 个 code=201（库存不足）
+#      - 断言：SELECT stock,status FROM tb_product WHERE id=? → stock=0, status=2（售罄）
+#      - 断言：SELECT COUNT(*) FROM tb_order WHERE product_id=? → 1
+#   ② JMeter 1000 线程 / Ramp-up 0 → 看聚合报告里 200 与 201 的计数
+#
+#  这个用例的代码我可以直接帮你写（含断言与 SQL 核对），需要的话告我。
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+###############################################################################
+# §10  失败用例一览（跑完后请重点回填这里）
+###############################################################################
+#
+#  §6 里有一条用例在当前配置下【必然跑不出预期结果】，先说明清楚，免得你白排查：
+#
+#  ✗ 「邮件发送失败 → code=105 / msg=邮件发送失败，请稍后重试」
+#     原因：dev profile 的 app.email.skip=true，send() 方法在 skip 分支直接 return，
+#           根本不会走 SMTP，所以 MailException 永远不会抛。
+#     要验证它：把 EMAIL_SKIP 设为 false + 配一个不可达的 MAIL_HOST（如 127.0.0.1:1），
+#               重启后用【新邮箱】请求验证码，即可看到 105。
+#     （注意：105 时后端会删除本次验证码，见 EmailCodeServiceImpl#sendByMail）
+#
+#  §6 里两条需要「等」的用例：
+#  ✗ 「超时取消 15 分钟未支付」→ 见 §7-A 的 SQL 加速
+#  ✗ 「自动确认收货 7 天 / 前 24 小时提醒 / 退款被拒 3 天恢复」→ 见 §7-B/C/D，
+#     且这三个是每日 cron，需要临时改成每分钟才能当场验证。
+#
+###############################################################################
