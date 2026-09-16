@@ -55,7 +55,11 @@ const counts = ref({})
 const errorMessage = ref('')
 const forbidden = ref(false)
 
-/** 行级+操作级同步锁：`${id}:${action}`（创建用 'create'） */
+/**
+ * 行级 + 操作级同步锁：`${id}:${action}`
+ * ⚠️ 只用于**会产生异步请求的行内操作**（当前只有删除：`${id}:delete`）。
+ *    新增/编辑走的是弹窗自己的 `submitting` 锁（打开弹窗是同步动作，不需要占行锁）。
+ */
 const busyKey = ref('')
 
 // ---------------- 新增 / 编辑弹窗 ----------------
@@ -234,18 +238,19 @@ async function handleDelete(row) {
   busyKey.value = keyOf(row, 'delete')
   try {
     const count = counts.value[row.id]
-    await ElMessageBox.confirm(
+    // 文案按真实数量分三种情况（取不到数量时不编数字，也不说"有 0 件还会被拒绝"这种错话）
+    const message =
       count == null
         ? '删除后该分类会从发布页与首页筛选中消失，且不可恢复。'
-        : `该分类下有 ${count} 件商品时后端会拒绝删除；确认删除「${row.name}」？`,
-      `确认删除「${row.name}」？`,
-      {
-        confirmButtonText: '确认删除',
-        cancelButtonText: '取消',
-        type: 'warning',
-        customClass: 'cm-confirm-box'
-      }
-    )
+        : count === 0
+          ? '该分类下没有商品，可以直接删除。'
+          : `该分类下有 ${count} 件商品，直接删除会被后端拒绝（code=208），届时会引导你把商品迁移到其它分类。`
+    await ElMessageBox.confirm(message, `确认删除「${row.name}」？`, {
+      confirmButtonText: '确认删除',
+      cancelButtonText: '取消',
+      type: 'warning',
+      customClass: 'cm-confirm-box'
+    })
     await deleteCategory(row.id)
     ElMessage.success('分类已删除')
     await fetchCategories()
@@ -379,12 +384,12 @@ onMounted(fetchCategories)
 
         <el-table-column label="操作" width="180" align="right">
           <template #default="{ row }">
+            <!-- 编辑只是打开弹窗（同步动作，无请求）→ 不需要 loading，只受 isBusy 串行约束 -->
             <el-button
               type="primary"
               plain
               size="small"
               :disabled="isBusy"
-              :loading="busyOn(row, 'edit')"
               @click="openEdit(row)"
             >
               编辑

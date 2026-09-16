@@ -193,7 +193,7 @@ async function handleLogout() {
       background 0.18s ease,
       color 0.18s ease;
 
-    &:hover:not(.is-disabled) {
+    &:hover {
       background: $cm-hover-bg;
       color: $cm-text;
     }
@@ -202,11 +202,6 @@ async function handleLogout() {
     &.router-link-active {
       background: $cm-primary-50;
       color: $cm-primary-700;
-    }
-
-    &.is-disabled {
-      opacity: 0.5;
-      cursor: not-allowed;
     }
   }
 
