@@ -24,6 +24,16 @@ const emit = defineEmits(['expire'])
 
 const remainSeconds = ref(0)
 let timer = null
+/**
+ * 已经为「哪一组 (createTime, minutes)」通知过父组件。
+ *
+ * ⚠️ 必须去重：倒计时归零时组件自己并不知道后端有没有真的把订单改成 4-已取消，
+ *    父组件收到 expire 后一般会重新拉一次订单详情。如果父组件那次刷新又把本组件卸载重建
+ *    （例如刷新时切回了骨架屏），重建后 onMounted → 依然是"已超时" → 立刻再 emit 一次
+ *    → 父组件再刷新 …… 形成「刷新 ↔ 重建」死循环，页面永远卡在骨架屏、请求也会被打爆。
+ *    所以同一笔订单只通知一次；订单本身换了（createTime 变了）才允许再次通知。
+ */
+let notifiedKey = ''
 
 /**
  * 解析后端时间字符串。
@@ -52,11 +62,20 @@ function stopTimer() {
   }
 }
 
+/** 同一笔订单只通知一次，见 notifiedKey 的说明 */
+function emitExpireOnce() {
+  const key = `${props.createTime}|${props.minutes}`
+  if (notifiedKey === key) return
+  notifiedKey = key
+  emit('expire')
+}
+
 function startTimer() {
   stopTimer()
   computeRemain()
   if (remainSeconds.value <= 0) {
-    emit('expire')
+    // 挂载时就已经超时（比如用户几分钟后才打开详情页）：通知一次让父组件拉最新状态
+    emitExpireOnce()
     return
   }
   timer = setInterval(() => {
@@ -64,7 +83,7 @@ function startTimer() {
     if (remainSeconds.value <= 0) {
       remainSeconds.value = 0
       stopTimer()
-      emit('expire')
+      emitExpireOnce()
     }
   }, 1000)
 }
@@ -79,7 +98,12 @@ const formatted = computed(() => {
 
 const isUrgent = computed(() => remainSeconds.value > 0 && remainSeconds.value <= 60)
 
-watch(() => [props.createTime, props.minutes], startTimer)
+/**
+ * 用「getter 数组」而不是 `() => [a, b]`：
+ * 后者每次求值都返回**新数组**，Vue 判等永远认为变了，任何一次重新求值都会触发回调，
+ * 在这里就意味着倒计时被反复重启（进而反复 emit）。数组里放 getter，只有值真的变了才触发。
+ */
+watch([() => props.createTime, () => props.minutes], startTimer)
 onMounted(startTimer)
 onBeforeUnmount(stopTimer)
 </script>

@@ -15,7 +15,7 @@
  * ⚠️ 卖家信息取自商品详情接口（OrderVO 不含卖家昵称），商品被删除时优雅降级 —— 且只展示昵称与地点，
  *    绝无手机号/邮箱（后端 VO 本身也不下发这些敏感字段）。
  */
-import { computed, onMounted, ref } from 'vue'
+import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { ArrowLeft, Location, Van, Clock, ChatDotRound } from '@element-plus/icons-vue'
@@ -38,7 +38,7 @@ import {
 } from '@/api/order'
 import { useUserStore } from '@/stores/user'
 import { formatPrice, formatDate } from '@/utils/format'
-import { orderStatusHint } from '@/utils/constants'
+import { CODE, orderStatusHint } from '@/utils/constants'
 
 const route = useRoute()
 const router = useRouter()
@@ -46,11 +46,28 @@ const userStore = useUserStore()
 
 const orderId = computed(() => String(route.params.orderId || ''))
 
-const loading = ref(true)
+/**
+ * 页面状态机：loading → success / notFound / error
+ *
+ * ⚠️ 这里曾经有一个真实 Bug：`loading` 初始化为 true 后**从来没有被置回 false**
+ *    （全项目只有这个视图漏了复位），导致接口失败时骨架屏永远转不完，
+ *    下面的 notFound / error 分支**根本不可达**。
+ *    修法：把 loading 换成显式状态机，所有分支都必须能落到 success / notFound / error 三者之一。
+ */
+const pageState = ref('loading')
+const errorMessage = ref('')
 const acting = ref(false)
 const order = ref(null)
 /** 商品详情（用于取卖家昵称/交易地点/封面），商品已删除时为 null */
 const productInfo = ref(null)
+
+/**
+ * 骨架屏最长展示时间（兜底）
+ * axios 实例超时是 10s，正常不会走到这里；万一遇到"连接挂住但不超时"的情况，
+ * 也要保证用户不会永远看着骨架屏。
+ */
+const LOADING_MAX_MS = 12000
+let stateGuardTimer = null
 
 const status = computed(() => Number(order.value?.status))
 const tradeType = computed(() => Number(order.value?.tradeType))
@@ -100,13 +117,57 @@ const hasActions = computed(
 )
 
 // ------------------------------------------------------------------ 数据加载
-async function loadOrder() {
+/** 骨架屏兜底计时器：超时仍未出结果就落到 error 态，避免无限骨架屏 */
+function startStateGuard() {
+  clearStateGuard()
+  stateGuardTimer = setTimeout(() => {
+    stateGuardTimer = null
+    if (pageState.value === 'loading') {
+      pageState.value = 'error'
+      errorMessage.value = '加载超时，请检查网络后重试'
+    }
+  }, LOADING_MAX_MS)
+}
+
+function clearStateGuard() {
+  if (stateGuardTimer) {
+    clearTimeout(stateGuardTimer)
+    stateGuardTimer = null
+  }
+}
+
+/**
+ * 拉订单详情
+ *
+ * @param {object} [options]
+ * @param {boolean} [options.showSkeleton=true] 是否切回 loading 态。
+ *   初始加载与「重试」要显示骨架屏；而支付/发货等操作后的刷新应保留当前内容，避免整页闪一下。
+ */
+async function loadOrder({ showSkeleton = true } = {}) {
+  if (showSkeleton) {
+    pageState.value = 'loading'
+    errorMessage.value = ''
+  }
+  startStateGuard()
+
   try {
     order.value = await getOrderDetail(orderId.value, { silent: true })
+    pageState.value = 'success'
   } catch (error) {
-    console.warn('[order-detail] 订单加载失败：', error?.message)
-    ElMessage.error('订单不存在或无权查看')
     order.value = null
+    console.warn('[order-detail] 订单加载失败：', error?.message)
+
+    // 后端语义（已读 OrderServiceImpl 核实）：
+    //   订单不存在 / 不属于当前用户 → requireOrder 与归属校验都抛 noPermission → **code=203**
+    //   204 是「商品不存在或已下架」，订单接口不会返回，但一起兜住以防将来复用
+    if (error?.code === CODE.NO_PERMISSION || error?.code === CODE.PRODUCT_NOT_AVAILABLE) {
+      pageState.value = 'notFound'
+    } else {
+      pageState.value = 'error'
+      errorMessage.value = error?.message || '网络异常或服务不可用'
+    }
+  } finally {
+    clearStateGuard()
   }
 }
 
@@ -120,10 +181,36 @@ async function loadProduct() {
   }
 }
 
-async function reloadAll() {
-  await loadOrder()
-  await loadProduct()
+/**
+ * 重新拉取
+ * @param {boolean} [showSkeleton=true] 见 loadOrder 的说明
+ */
+async function reloadAll(showSkeleton = true) {
+  await loadOrder({ showSkeleton })
+  if (pageState.value === 'success') await loadProduct()
 }
+
+/** 「加载失败」上的重试按钮 */
+function handleRetry() {
+  reloadAll(true)
+}
+
+/**
+ * 支付倒计时归零：后端的超时取消定时任务可能已经把这笔订单改成 4-已取消，静默刷新一次状态。
+ *
+ * ⚠️ 这里必须显式传 false（不能写成 `@expire="reloadAll"`）：
+ *    PayCountdown 的 emit 不带参数，`@expire="reloadAll"` 实际调用的是 reloadAll(undefined)，
+ *    而 reloadAll 的形参默认值是 showSkeleton = true —— undefined 会触发默认值，
+ *    于是页面切回 loading 态，骨架屏分支把整个 success 分支（包括 PayCountdown 自己）卸载，
+ *    重新挂载后倒计时依旧「已超时」→ 立刻再次 emit('expire') → 再次切 loading ……
+ *    「加载中 ↔ 成功」无限循环，用户看到的就是**永远转不完的骨架屏**。
+ *    这是本页无限骨架屏的第二个成因（第一个是 loadOrder 从不复位 loading）。
+ */
+function handleExpire() {
+  reloadAll(false)
+}
+
+onBeforeUnmount(clearStateGuard)
 
 // ------------------------------------------------------------------ 操作封装
 /** 统一处理「确认弹窗 → 调接口 → 提示 → 刷新」这套流程，避免每个按钮重复写一遍 */
@@ -145,11 +232,12 @@ async function runAction({ confirm, request, successText }) {
   try {
     await request()
     ElMessage.success(successText)
-    await reloadAll()
+    // false：操作成功后刷新要保留当前内容，不能整页闪一次骨架屏
+    await reloadAll(false)
   } catch (error) {
     console.warn('[order-detail] 操作失败：', error?.message)
     // 状态冲突（209）通常意味着状态已被别处改掉，刷新一次让页面回到真实状态
-    await reloadAll()
+    await reloadAll(false)
   } finally {
     acting.value = false
   }
@@ -289,7 +377,10 @@ function goBack() {
   else router.push({ name: 'order-list' })
 }
 
-onMounted(reloadAll)
+// 初始加载：显示骨架屏。
+// ⚠️ 不能写成 onMounted(reloadAll)——那样会把 hook 的入参当成 showSkeleton 传进去，
+//    首屏反而不会显示 loading 态。
+onMounted(() => reloadAll(true))
 </script>
 
 <template>
@@ -300,11 +391,31 @@ onMounted(reloadAll)
       <span class="order-detail__crumb-text">订单详情</span>
     </div>
 
-    <div v-if="loading" class="order-detail__skeleton">
+    <!-- ① loading：骨架屏（有 12s 兜底，不会无限转） -->
+    <div v-if="pageState === 'loading'" class="order-detail__skeleton">
       <el-skeleton :rows="8" animated />
     </div>
 
-    <template v-else-if="order">
+    <!-- ② error：接口失败 / 网络异常 → 可重试 -->
+    <EmptyState
+      v-else-if="pageState === 'error'"
+      title="加载失败，请重试"
+      :description="errorMessage || '网络异常或服务不可用，请检查后端是否已启动。'"
+      action-text="重新加载"
+      @action="handleRetry"
+    />
+
+    <!-- ③ notFound：订单不存在或不属于当前用户（后端 code=203）→ 回订单列表 -->
+    <EmptyState
+      v-else-if="pageState === 'notFound'"
+      title="订单不存在或无权访问"
+      description="可能是订单号有误，或者这笔订单不属于当前账号。可以回订单列表看看其它订单。"
+      action-text="返回订单列表"
+      @action="router.push({ name: 'order-list' })"
+    />
+
+    <!-- ④ success：正常渲染 -->
+    <template v-else-if="pageState === 'success' && order">
       <!-- ---------------- 状态头部 ---------------- -->
       <section class="order-detail__head">
         <div class="order-detail__head-left">
@@ -315,7 +426,7 @@ onMounted(reloadAll)
         <div class="order-detail__head-right">
           <div v-if="isPending" class="order-detail__countdown">
             <el-icon :size="14"><Clock /></el-icon>
-            <PayCountdown :create-time="order.createTime" @expire="reloadAll" />
+            <PayCountdown :create-time="order.createTime" @expire="handleExpire" />
           </div>
           <p v-else-if="hint" class="order-detail__hint">{{ hint }}</p>
         </div>
@@ -505,12 +616,16 @@ onMounted(reloadAll)
       </div>
     </template>
 
+    <!--
+      兜底分支：理论上不可达（pageState 只可能是上面四种之一，且 success 必有 order）。
+      留着是为了万一将来出现「状态与数据不一致」时，用户看到的是可操作的提示而不是白屏。
+    -->
     <EmptyState
       v-else
-      title="订单不存在或无权查看"
-      description="可能是订单号有误，或者这笔订单不属于当前账号。"
-      action-text="返回订单列表"
-      @action="router.push({ name: 'order-list' })"
+      title="页面状态异常"
+      description="订单数据与页面状态不一致，请点击下方按钮重新加载。"
+      action-text="重新加载"
+      @action="handleRetry"
     />
   </main>
 </template>
