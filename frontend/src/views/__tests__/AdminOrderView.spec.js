@@ -38,7 +38,7 @@ vi.mock('@/api/admin', () => ({
   migrateCategory: vi.fn()
 }))
 
-import AdminOrderView, { resolvePlaceHeader } from '@/views/admin/AdminOrderView.vue'
+import AdminOrderView from '@/views/admin/AdminOrderView.vue'
 
 class ResizeObserverStub {
   observe() {}
@@ -289,25 +289,23 @@ describe('AdminOrderView 订单管理', () => {
     expect(toast).toContain('列表已更新')
   })
 
-  // ---------------- 5.2.1 补丁项 ----------------
+  // ---------------- 5.2.1 / 5.2.3 补丁项 ----------------
 
-  it('⑫ 「地点 / 地址」列：面交订单渲染约定地点，表头切成「面交地点」', async () => {
-    const { wrapper } = await mountPage([baseOrder]) // tradeType=1，address 存的是面交约定地点
+  it('⑫ 「地点 / 地址」列：表头在任何数据下都是固定中性文案，逐行由交易方式标签区分', async () => {
+    // 全为面交订单
+    const face = await mountPage([baseOrder]) // tradeType=1，address 存的是面交约定地点
+    expect(face.wrapper.text()).toContain('地点 / 地址')
+    expect(face.wrapper.text()).toContain('图书馆一楼大厅')
+    expect(face.wrapper.text()).not.toContain('面交地点')
 
-    expect(wrapper.text()).toContain('图书馆一楼大厅')
-    expect(wrapper.text()).toContain('面交地点')
+    // 面交 + 邮寄混合：表头不变（5.2.3 拍板方案 B —— 表头表达"列语义"，不随数据抖动）
+    const mixed = await mountPage([baseOrder, MAIL_ORDER])
+    expect(mixed.wrapper.text()).toContain('地点 / 地址')
+    expect(mixed.wrapper.text()).toContain('1号宿舍楼101室') // 邮寄收货地址照样渲染
+    expect(mixed.wrapper.text()).not.toContain('收货地址')
   })
 
-  it('⑬ 当前页混有邮寄订单时，表头用中性叫法（不写只对一半数据成立的名字）', async () => {
-    const { wrapper } = await mountPage([baseOrder, MAIL_ORDER])
-
-    expect(wrapper.text()).toContain('图书馆一楼大厅') // 面交约定地点
-    expect(wrapper.text()).toContain('1号宿舍楼101室') // 邮寄收货地址
-    expect(wrapper.text()).toContain('地点 / 地址')
-    expect(wrapper.text()).not.toContain('面交地点')
-  })
-
-  it('⑭ 「已发货」页签点明"仅邮寄"（面交订单状态流转 0→1→3，不会经过已发货）', async () => {
+  it('⑬ 「已发货」页签点明"仅邮寄"（面交订单状态流转 0→1→3，不会经过已发货）', async () => {
     const { wrapper } = await mountPage()
 
     const tab = wrapper.findAll('.admin-order__tab').find((t) => t.text().includes('已发货'))
@@ -319,21 +317,11 @@ describe('AdminOrderView 订单管理', () => {
     expect(wrapper.text()).toContain('待支付')
   })
 
-  // ---------------- 5.2.2 补丁项 ----------------
-
-  it('⑮ 空列表时表头必须是中性「地点 / 地址」，不能是空字符串/undefined', async () => {
-    // 纯函数直接覆盖边界：直接看 computed 是测不到的 ——
-    // 空列表会先落到「空状态」分支，表格根本不渲染，DOM 里没有表头可断言。
-    expect(resolvePlaceHeader([])).toBe('地点 / 地址')
-    expect(resolvePlaceHeader(undefined)).toBe('地点 / 地址')
-    expect(resolvePlaceHeader([{ tradeType: 3 }])).toBe('地点 / 地址') // 两者皆可 → 中性
-    expect(resolvePlaceHeader([{ tradeType: 1 }])).toBe('面交地点')
-    expect(resolvePlaceHeader([{ tradeType: 2 }])).toBe('收货地址')
-    expect(resolvePlaceHeader([{ tradeType: 1 }, { tradeType: 2 }])).toBe('地点 / 地址')
-
-    // DOM 侧同时确认：空结果时不会出现一个"写着面交地点却没有任何数据"的表头
+  it('⑭ 没有订单时走空状态：DOM 里不渲染表格，也就不会有任何表头', async () => {
     const { wrapper } = await mountPage([])
+
     expect(wrapper.find('.admin-order__table').exists()).toBe(false)
-    expect(wrapper.text()).not.toContain('面交地点')
+    expect(wrapper.findAll('.el-table__header').length).toBe(0)
+    expect(wrapper.text()).toContain('还没有任何订单')
   })
 })

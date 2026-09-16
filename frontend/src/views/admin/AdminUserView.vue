@@ -426,15 +426,15 @@ onMounted(fetchList)
       <el-table :data="displayRecords" row-key="id" class="admin-user__table">
         <el-table-column label="用户" min-width="200">
           <template #default="{ row }">
-            <div class="admin-user__cell">
-              <span class="admin-user__avatar">{{ (row.nickname || row.username || '？').trim().charAt(0) }}</span>
-              <div class="admin-user__info">
-                <p class="admin-user__name">{{ row.nickname || '未命名用户' }}</p>
-                <p class="admin-user__meta">
-                  ID <span class="cm-num">{{ row.id }}</span>
-                </p>
+            <!-- ID 不再常驻一行（信息量低又占行高），改到悬浮提示里；content 是完整 ID，不是缩写 -->
+            <el-tooltip :content="`ID: ${row.id}`" placement="top">
+              <div class="admin-user__cell">
+                <span class="admin-user__avatar">{{ (row.nickname || row.username || '？').trim().charAt(0) }}</span>
+                <div class="admin-user__info">
+                  <p class="admin-user__name">{{ row.nickname || '未命名用户' }}</p>
+                </div>
               </div>
-            </div>
+            </el-tooltip>
           </template>
         </el-table-column>
 
@@ -659,13 +659,6 @@ onMounted(fetchList)
     font-size: 13.5px;
     font-weight: 600;
     color: $cm-text;
-    @include cm-ellipsis;
-  }
-
-  &__meta {
-    font-size: 11.5px;
-    color: $cm-text-placeholder;
-    margin-top: 2px;
     @include cm-ellipsis;
   }
 

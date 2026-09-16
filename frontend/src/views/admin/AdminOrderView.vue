@@ -1,30 +1,3 @@
-<script>
-/**
- * 「地点 / 地址」列的表头（纯函数，便于单测直接覆盖空数组等边界）
- *
- * 背景：后端 `tb_order` 只有 `address` 一个自由文本字段 —— 面交时写的是约定地点，邮寄时写的是收货地址
- * （SYSTEM_PROMPT 后端硬约束第 6 条）。所以这一列的语义**跟着 tradeType 走**。
- *
- * el-table-column 的 label 是**整列一个**（没法按行变），而列表按状态筛选后可能同时存在面交与邮寄订单，
- * 于是按传入数据判断：全部面交 → 面交地点；全部邮寄 → 收货地址；其余（混合 / 含"两者皆可" / **空数组**）
- * → 中性的「地点 / 地址」，由行内的「交易方式」标签负责区分每一条。
- *
- * ⚠️ 空数组必须落到中性表头，不能返回 undefined —— 否则 el-table 会渲染出一个空白表头。
- *
- * ⚠️ 已知取舍（5.2.2 报告中已列为待拍板项）：传入的是**当前页数据**，所以翻页时若 tradeType 组合变化，
- *    表头会跟着变。这是"表头语义正确"与"表头稳定"之间的取舍，方案对比见报告第三节任务 1。
- *
- * @param {Array} records 订单列表（可以是空数组）
- * @returns {string} 表头文案
- */
-export function resolvePlaceHeader(records) {
-  const types = new Set((Array.isArray(records) ? records : []).map((row) => Number(row?.tradeType)))
-  if (types.size === 1 && types.has(1)) return '面交地点'
-  if (types.size === 1 && types.has(2)) return '收货地址'
-  return '地点 / 地址'
-}
-</script>
-
 <script setup>
 /**
  * 管理端 · 订单管理（/admin/order）
@@ -96,9 +69,6 @@ const busyOn = (row, action) => busyKey.value === keyOf(row, action)
 /** 可操作的两种状态（与后端一致：解冻只对 5，强制退款只对 6/7） */
 const isFrozen = (row) => Number(row?.status) === 5
 const isRefunding = (row) => [6, 7].includes(Number(row?.status))
-
-/** 表头文案：逻辑在 resolvePlaceHeader 里（含空数组兜底），这里只负责喂当前页数据 */
-const placeHeader = computed(() => resolvePlaceHeader(records.value))
 
 // ------------------------------------------------------------------ 加载
 async function fetchList() {
@@ -349,8 +319,8 @@ onMounted(fetchList)
           </template>
         </el-table-column>
 
-        <!-- 表头按当前页数据的 tradeType 切换：面交→面交地点 / 邮寄→收货地址 / 混合→中性叫法 -->
-        <el-table-column :label="placeHeader" min-width="170">
+        <!-- 表头固定为中性，逐行由 TradeTypeTag 区分面交/邮寄；表头不随数据抖动 -->
+        <el-table-column label="地点 / 地址" min-width="170">
           <template #default="{ row }">
             <span class="admin-order__place">{{ row.address || '未填写' }}</span>
           </template>

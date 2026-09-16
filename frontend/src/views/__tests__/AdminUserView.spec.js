@@ -14,6 +14,7 @@ import { mount, flushPromises } from '@vue/test-utils'
 import { createPinia, setActivePinia } from 'pinia'
 import { createRouter, createMemoryHistory } from 'vue-router'
 import ElementPlus from 'element-plus'
+import { ElTooltip } from 'element-plus'
 
 const getUserListMock = vi.fn()
 const banMock = vi.fn()
@@ -353,17 +354,21 @@ describe('AdminUserView 用户管理', () => {
     expect(second.size).toBeUndefined()
   })
 
-  it('⑭ 「用户」列的主行是昵称、副行只有 ID（学号已拆成独立列，此处无冗余）', async () => {
+  it('⑭ 「用户」列只有头像+昵称，ID 移入 el-tooltip 且是完整值（副行已删除）', async () => {
     const { wrapper } = await mountPage()
 
     expect(wrapper.find('.admin-user__name').text()).toBe('数院小周')
-    expect(wrapper.find('.admin-user__meta').text()).toContain('ID')
-    expect(wrapper.find('.admin-user__meta').text()).toContain('26')
-    // 学号不再出现在「用户」列里（否则与独立列重复）
-    expect(wrapper.find('.admin-user__meta').text()).not.toContain('2021001')
-    // 头像取昵称首字
-    expect(wrapper.find('.admin-user__avatar').text()).toBe('数')
-    // 学号自己在独立列里
+    expect(wrapper.find('.admin-user__avatar').text()).toBe('数') // 昵称首字
+    // 副行删除后，「用户」列不再常驻 ID
+    expect(wrapper.find('.admin-user__meta').exists()).toBe(false)
+
+    // ID 在悬浮提示里，且必须是完整 ID（不是缩写）。
+    // 这里按"所有 tooltip 的 content 里存在 ID: 26"断言，不依赖 DOM 位置 ——
+    // el-table 的 .hidden-columns 影子副本也会渲染一份 tooltip（其 row 是空对象 → ID: undefined）。
+    const tipContents = wrapper.findAllComponents(ElTooltip).map((t) => String(t.props('content')))
+    expect(tipContents).toContain('ID: 26')
+
+    // 学号仍只在独立列出现
     expect(wrapper.find('.admin-user__username').text()).toBe('2021001')
   })
 })
