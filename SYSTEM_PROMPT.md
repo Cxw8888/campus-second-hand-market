@@ -37,6 +37,13 @@
 - Element Plus 2.14.5（vite.config.js 中 unplugin-vue-components + unplugin-auto-import 按需引入，非全局注册）
   - 模板组件：resolver 解析不到的组件不会构建报错，会运行时静默降级成自定义元素 → 新组件必须确认引入生效
   - 函数式 API（ElMessage / ElMessageBox / ElNotification / ElLoading）：业务代码里显式 `import { ElMessage } from 'element-plus'` 会绕过 auto-import 的样式自动注入，导致该组件的 CSS 完全不进构建产物（弹窗跑到左下角、toast 无样式都是这个症状）→ 所有函数式 API 的样式入口必须在 src/main.js 集中显式引入，新增函数式 API 时同步补样式 import
+  - **el-date-editor 在本项目解析不了**：Element Plus 2.14.5 的
+    自动导入解析器会去找 `element-plus/es/components/date-editor/style/css`，
+    但该入口不存在 → npm test 直接报 `Failed to resolve import` 编译失败。
+    日期选择必须用 `el-date-picker`（如 `<el-date-picker type="datetimerange">`），
+    不要写 `el-date-editor`。注意：`el-date-editor` 是 EP 内部渲染出的
+    DOM class 名（不是组件名），`verify:styles` 里断言 `.el-date-editor`
+    仍然有效，那是产物 CSS 关键字。
   - EP 2.x 弹窗居中机制是 inline-block + vertical-align:middle + text-align:center + :after 幽灵元素，不是 flexbox；排查弹窗定位问题时不要假设 justify-content / align-items
 - Pinia（userStore 管理登录态 / token / 用户信息）
 - Vue Router 4（命名路由 + meta.requiresAuth）
@@ -163,6 +170,11 @@ src/
 - 运行：`npm test` / `npm run test:watch`
 - **测试陷阱**：`el-table` 会把模板再渲染一份到 `.hidden-columns`（row 是空对象），`wrapper.findAll('button')` 会先命中影子副本 → 用 `findRowButton()` 限定在 `.el-table__body` 内
 - **测试陷阱**：`flushPromises` 不能与假定时器共用
+- **测试陷阱**：不要断言过渡中间态（如 el-dialog 的 `.is-closing`）。
+  EP 的过渡是 rAF 驱动，jsdom 下单独跑可能通过、全量并发跑随机失败
+  （断言时刻早于 Vue 的过渡帧）。改为等待稳定终态后再断言：
+  `await new Promise(r => setTimeout(r, 500))` 后只断言
+  「overlay 隐藏 / dialog 不可见」这类终态。
 
 ## 需求原文勘误
 - ORDER_STATUS_MAP[2].label 实际是「已发货待收货」，不是「已发货」。
