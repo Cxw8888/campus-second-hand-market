@@ -127,6 +127,18 @@ const routes = [
         name: 'admin-product-audit',
         component: () => import('@/views/admin/AdminProductAuditView.vue'),
         meta: { title: '商品审核' }
+      },
+      {
+        path: 'user',
+        name: 'admin-user',
+        component: () => import('@/views/admin/AdminUserView.vue'),
+        meta: { title: '用户管理' }
+      },
+      {
+        path: 'order',
+        name: 'admin-order',
+        component: () => import('@/views/admin/AdminOrderView.vue'),
+        meta: { title: '订单管理' }
       }
     ]
   },

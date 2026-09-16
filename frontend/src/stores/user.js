@@ -32,6 +32,17 @@ export const useUserStore = defineStore(
     const isAdmin = computed(() => Number(userInfo.value?.role) === 1)
 
     /**
+     * 当前登录用户的 ID（统一成字符串）
+     *
+     * 供「不能封禁自己」这类**自比较**使用。
+     * ⚠️ 取的是 store 里的 `userId`（登录时由 LoginVO.userId 写入、兜底时由 UserVO.id 映射而来），
+     *    **不是** `userInfo.id` —— 后者根本不存在，写成它会让自比较恒为 false，白名单形同虚设。
+     */
+    const userId = computed(() =>
+      userInfo.value?.userId == null ? '' : String(userInfo.value.userId)
+    )
+
+    /**
      * 角色是否已知
      *
      * 登录成功后 role 一定在（LoginVO 带 role）；但本地缓存可能缺 role：
@@ -129,6 +140,7 @@ export const useUserStore = defineStore(
       isLoggedIn,
       displayName,
       isAdmin,
+      userId,
       hasRole,
       ensureProfile,
       login,

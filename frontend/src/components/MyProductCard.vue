@@ -15,9 +15,9 @@
  */
 import { computed } from 'vue'
 import ProductImage from '@/components/ProductImage.vue'
+import ProductStatusTag from '@/components/ProductStatusTag.vue'
 import TradeTypeTag from '@/components/TradeTypeTag.vue'
 import { formatPrice, formatRelativeTime } from '@/utils/format'
-import { productStatusLabel, productStatusTone } from '@/utils/constants'
 
 const props = defineProps({
   /** ProductListVO（来自 GET /product/my） */
@@ -30,8 +30,6 @@ const emit = defineEmits(['edit', 'off-shelf', 're-list', 'delete'])
 
 const status = computed(() => Number(props.product.status))
 const price = computed(() => formatPrice(props.product.price))
-const tone = computed(() => productStatusTone(status.value))
-const statusLabel = computed(() => productStatusLabel(status.value))
 const createdText = computed(() => formatRelativeTime(props.product.createTime))
 
 const isOnSale = computed(() => status.value === 1)
@@ -52,7 +50,10 @@ const isSoldOut = computed(() => status.value === 2)
       <h3 class="my-product__title">{{ product.title }}</h3>
 
       <div class="my-product__tags">
-        <span class="my-product__status" :class="`is-${tone}`">{{ statusLabel }}</span>
+        <!-- 状态标签统一走 ProductStatusTag（配色取自 constants.js 的 PRODUCT_STATUS_MAP）：
+             原来这里自己写了一套 is-green/is-blue/is-orange/is-gray，与管理端商品审核页各写一份，
+             语义漂移风险高，所以 5.2 统一成同一个组件。 -->
+        <ProductStatusTag :status="product.status" size="sm" />
         <!-- 交易方式三色标签：面交绿 / 邮寄蓝 / 皆可橙 -->
         <TradeTypeTag :type="product.tradeType" size="sm" />
         <span v-if="product.categoryName" class="my-product__category">{{ product.categoryName }}</span>
@@ -159,38 +160,7 @@ const isSoldOut = computed(() => status.value === 2)
     flex-wrap: wrap;
   }
 
-  // 状态标签配色与订单状态保持同一套语义
-  &__status {
-    padding: 2px 9px;
-    border-radius: $cm-radius-pill;
-    font-size: 11px;
-    font-weight: 600;
-    border: 1px solid transparent;
-
-    &.is-green {
-      color: $cm-primary-700;
-      background: $cm-primary-50;
-      border-color: rgba($cm-primary, 0.28);
-    }
-
-    &.is-blue {
-      color: #1d4ed8;
-      background: $cm-blue-50;
-      border-color: rgba($cm-blue, 0.28);
-    }
-
-    &.is-orange {
-      color: $cm-accent-dark;
-      background: $cm-accent-50;
-      border-color: rgba($cm-accent, 0.32);
-    }
-
-    &.is-gray {
-      color: $cm-gray-tag;
-      background: $cm-gray-tag-50;
-      border-color: rgba($cm-gray-tag, 0.22);
-    }
-  }
+  // 状态标签的样式已移到 ProductStatusTag.vue（5.2 统一），这里不再保留一份
 
   // 交易方式标签样式由 TradeTypeTag 提供（原来是中性灰，看不出面交/邮寄）
   &__category {

@@ -64,6 +64,16 @@ const REQUIRED = [
   {
     keyword: '.el-table__header',
     guard: 'el-table 表头单元格样式（el-table-column 的样式入口）'
+  },
+  {
+    // 5.2 新增：用户管理的「角色 / 状态」用 el-tag 呈现（这是本项目第一次用 el-tag）
+    keyword: '.el-tag{',
+    guard: '管理端 el-tag 标签（批次 5.2 首次引入：角色 / 用户状态）'
+  },
+  {
+    // 5.2 新增：用户管理、订单管理两个列表都带分页
+    keyword: '.el-pagination{',
+    guard: 'el-pagination 分页器（管理端用户 / 订单列表）'
   }
 ]
 

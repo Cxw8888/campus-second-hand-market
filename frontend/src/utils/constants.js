@@ -375,6 +375,83 @@ export function auditResultTone(result) {
   return AUDIT_RESULT_MAP[Number(result)]?.tone ?? 'gray'
 }
 
+/** 管理端角色：0-学生, 1-管理员（AdminUserVO.java:36-37 / UserVO.java:39-40） */
+export const ADMIN_ROLE_MAP = {
+  0: { label: '学生', tone: 'gray' },
+  1: { label: '管理员', tone: 'blue' }
+}
+
+export function adminRoleLabel(role) {
+  return ADMIN_ROLE_MAP[Number(role)]?.label ?? '未知角色'
+}
+
+export function adminRoleTone(role) {
+  return ADMIN_ROLE_MAP[Number(role)]?.tone ?? 'gray'
+}
+
+/**
+ * 语义色调 → Element Plus `el-tag` 的 type
+ *
+ * 全站字典里的 tone 是**语义名**（green/blue/orange/gray…），而 el-tag 只认
+ * success/primary/warning/info/danger。把这张映射表集中放在这里，是为了保证
+ * 「同一个语义在任何页面都是同一个颜色」；否则每个页面各写一套 if-else，
+ * 迟早出现「gray 在审核日志里是 info、在用户列表里是 danger」这种漂移。
+ */
+export const TONE_TO_TAG_TYPE = {
+  green: 'success',
+  blue: 'primary',
+  orange: 'warning',
+  darkorange: 'danger',
+  yellow: 'warning',
+  purple: 'primary',
+  gray: 'info',
+  frozen: 'info'
+}
+
+export function tagTypeOf(tone) {
+  return TONE_TO_TAG_TYPE[tone] ?? 'info'
+}
+
+/**
+ * 管理端用户列表的状态页签：null = 全部
+ *
+ * ⚠️ 与商品列表**不同**：AdminUserQuery.status 没有字段默认值（AdminUserQuery.java:21-22），
+ *    省略就是「不过滤」，所以这里可以做「全部」页签。
+ */
+export const ADMIN_USER_STATUS_FILTERS = [null, 0, 1]
+
+/**
+ * 管理端用户列表的角色筛选：null = 全部
+ *
+ * ⚠️ 后端 `AdminUserQuery` **没有 role 字段**（只有 keyword + status，AdminUserQuery.java:19-22），
+ *    所以角色筛选**没有服务端支持**。页面的做法是：选中角色后一次性把当前筛选条件下的用户
+ *    拉满（size = MAX_PAGE_SIZE = 100，也是后端 @Max 上限），再在前端按 role 过滤 + 前端分页；
+ *    若库里用户总数超过 100，界面会明确提示"结果可能不完整"，不假装完整。
+ */
+export const ADMIN_ROLE_FILTERS = [null, 0, 1]
+
+/**
+ * 管理端订单列表的状态页签：null = 全部，其余取 ORDER_STATUS_MAP 的 8 个状态
+ * （AdminOrderQuery.status 同样没有默认值 → 省略即全部，AdminOrderQuery.java:18-19）
+ */
+export const ADMIN_ORDER_STATUS_FILTERS = [null, ...Object.keys(ORDER_STATUS_MAP).map(Number)]
+
+/**
+ * 管理端订单页签的补充说明
+ *
+ * 面交订单不经过「已发货」（0→1→3，或 0→3），所以状态 2 在管理端**只可能是邮寄订单**；
+ * 在页签上点明这一点，管理员就不会因为"已发货却没有物流信息"而困惑。
+ *
+ * ⚠️ 只影响**管理端页签文案**，不动 ORDER_STATUS_MAP ——
+ *    那个字典还被学生侧的 OrderStatusTag 使用，改它等于改了全站标签。
+ */
+export const ADMIN_ORDER_STATUS_TAB_NOTES = { 2: '（仅邮寄）' }
+
+export function adminOrderStatusTabLabel(status) {
+  if (status === null) return '全部'
+  return `${orderStatusLabel(status)}${ADMIN_ORDER_STATUS_TAB_NOTES[status] ?? ''}`
+}
+
 // ------------------------------------------------------------------ 业务响应码（按需补充）
 /** 与后端 ErrorCode 对齐，只列出前端会做特殊处理的部分 */
 export const CODE = {

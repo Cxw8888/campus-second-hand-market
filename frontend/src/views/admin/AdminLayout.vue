@@ -10,9 +10,9 @@
  * 登录态是**复用**的（不做第二个登录页）：能不能进这个壳由路由守卫按 role===1 决定，
  * 后端侧的真正把关是 AuthInterceptor 的 @RequireRole(1)。
  *
- * 菜单里的「用户管理 / 订单管理 / 分类管理 / 审计日志」本批（5.1）还没实现，
- * 故意做成**禁用 + tooltip 说明**，而不是先放一个点了报错的假按钮 ——
- * 这条规矩在批次 2 就定下来了（后端不支持的功能一律禁用 + tooltip）。
+ * 菜单：5.1 已接上「商品审核」，5.2 接上「用户管理 / 订单管理」；
+ * 5.3 的「分类管理 / 审计日志」仍做成**禁用 + tooltip 说明**，而不是先放一个点了报错的假按钮 ——
+ * 这条规矩在批次 2 就定下来了（后端不支持的功能一律禁用 + tooltip，这里同理）。
  */
 import { computed } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
@@ -36,10 +36,15 @@ const userStore = useUserStore()
 const username = computed(() => userStore.displayName)
 const avatarLabel = computed(() => (username.value || '管').trim().charAt(0))
 
-/** 后续批次要实现的菜单（5.2 / 5.3），先占位并说明原因 */
+/** 已实现的菜单（一律命名路由，不写 path 字符串） */
+const menus = [
+  { name: 'admin-product-audit', label: '商品审核', icon: Goods },
+  { name: 'admin-user', label: '用户管理', icon: User },
+  { name: 'admin-order', label: '订单管理', icon: List }
+]
+
+/** 后续批次（5.3）要实现的菜单，先占位并说明原因 */
 const pendingMenus = [
-  { key: 'user', label: '用户管理', icon: User, note: '将在 5.2 实现' },
-  { key: 'order', label: '订单管理', icon: List, note: '将在 5.2 实现' },
   { key: 'category', label: '分类管理', icon: CollectionTag, note: '将在 5.3 实现' },
   { key: 'audit-log', label: '审计日志', icon: Tickets, note: '将在 5.3 实现' }
 ]
@@ -68,12 +73,19 @@ async function handleLogout() {
       </div>
 
       <nav class="admin__nav">
-        <p class="admin__nav-group">内容管理</p>
+        <p class="admin__nav-group">管理功能</p>
 
-        <router-link :to="{ name: 'admin-product-audit' }" class="admin__nav-item">
-          <el-icon :size="15"><Goods /></el-icon>
-          <span>商品审核</span>
+        <router-link
+          v-for="item in menus"
+          :key="item.name"
+          :to="{ name: item.name }"
+          class="admin__nav-item"
+        >
+          <el-icon :size="15"><component :is="item.icon" /></el-icon>
+          <span>{{ item.label }}</span>
         </router-link>
+
+        <p class="admin__nav-group">待开放</p>
 
         <el-tooltip
           v-for="item in pendingMenus"

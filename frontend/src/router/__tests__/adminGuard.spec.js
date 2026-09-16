@@ -122,4 +122,28 @@ describe('管理端路由守卫', () => {
 
     expect(router.currentRoute.value.name).toBe('home')
   })
+
+  it('⑦ 5.2 新增的 /admin/user 与 /admin/order 同样受角色保护（子路由继承父级 meta）', async () => {
+    setToken('student-token')
+    const userStore = useUserStore()
+    userStore.userInfo = { userId: '17', nickname: '买家同学', role: 0 }
+
+    await router.push({ name: 'home' })
+    await router.push('/admin/user')
+    expect(router.currentRoute.value.name).toBe('forbidden')
+
+    await router.push({ name: 'home' })
+    await router.push('/admin/order')
+    expect(router.currentRoute.value.name).toBe('forbidden')
+
+    // 换成管理员则两个新页面都能进（证明拦的是角色，不是路径本身）
+    userStore.userInfo = { userId: '1', nickname: '管理员', role: 1 }
+    await router.push({ name: 'home' })
+    await router.push('/admin/order')
+    expect(router.currentRoute.value.name).toBe('admin-order')
+
+    await router.push({ name: 'home' })
+    await router.push('/admin/user')
+    expect(router.currentRoute.value.name).toBe('admin-user')
+  })
 })
