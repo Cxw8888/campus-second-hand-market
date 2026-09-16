@@ -291,6 +291,90 @@ export function isOrderUnfinished(status) {
   return [0, 1, 2, 6, 7].includes(Number(status))
 }
 
+// ------------------------------------------------------------------ 管理端（第五批）
+
+/**
+ * 管理端列表每页条数
+ *
+ * 后端 PageQuery：page 默认 1（@Min(1)）、size 默认 10（@Min(1) @Max(100)），
+ * 越界直接 code=100（PageQuery.java:22-29）。
+ */
+export const ADMIN_PAGE_SIZE = 10
+
+/**
+ * 管理端商品页的状态页签（顺序即展示顺序：待审核排第一，因为那是管理员的主要待办）
+ *
+ * ⚠️ **刻意不做「全部」页签**，原因是后端行为而不是偷懒：
+ *    AdminProductQuery.status 的字段默认值是 3（AdminProductQuery.java:19），
+ *    而 ServiceImpl 是 `.eq(query.getStatus() != null, ...)`（AdminServiceImpl.java:95）——
+ *    也就是说**省略参数 = 只查待审核，不是「不过滤」**。
+ *    想查「全部」只能显式传空串 `?status=`（Spring 把空串转成 null 才不过滤），
+ *    这个绑定行为在后端未启动的情况下我无法实测，与其做一个可能名不副实的「全部」，不如不做。
+ *
+ * 文案不在这里写死，统一走 productStatusLabel()（PRODUCT_STATUS_MAP 是唯一事实来源）。
+ */
+export const ADMIN_PRODUCT_STATUS_TABS = [3, 1, 0, 2]
+
+/** 管理端用户状态：0-正常, 1-封禁（与 tb_user.status 对齐，AdminUserVO.java:39-40） */
+export const ADMIN_USER_STATUS_MAP = {
+  0: { label: '正常', tone: 'green' },
+  1: { label: '已封禁', tone: 'gray' }
+}
+
+export function adminUserStatusLabel(status) {
+  return ADMIN_USER_STATUS_MAP[Number(status)]?.label ?? '状态未知'
+}
+
+export function adminUserStatusTone(status) {
+  return ADMIN_USER_STATUS_MAP[Number(status)]?.tone ?? 'gray'
+}
+
+/**
+ * 审计操作类型：与后端 AuditOperationType 枚举**逐字对应**（AuditOperationType.java:8-42），共 11 个。
+ *
+ * ⚠️ 这些字符串**直接落库**，且查询时是精确匹配（AdminServiceImpl.java:306-307）：
+ *    写错一个字母既不会报错，也查不出任何数据（表现为「筛选后永远是空列表」）。
+ *    所以这里不允许自造值，也不允许在页面里手写字符串。
+ */
+export const AUDIT_OPERATION_TYPE_MAP = {
+  APPROVE_PRODUCT: { label: '商品审核通过', tone: 'green' },
+  REJECT_PRODUCT: { label: '商品审核不通过', tone: 'orange' },
+  BAN_USER: { label: '封禁用户', tone: 'gray' },
+  UNBAN_USER: { label: '解封用户', tone: 'green' },
+  FORCE_OFFLINE: { label: '强制下架商品', tone: 'darkorange' },
+  UNFREEZE_ORDER: { label: '解冻订单', tone: 'blue' },
+  COMPLETE_ORDER: { label: '线下完成订单', tone: 'green' },
+  CREATE_CATEGORY: { label: '新建分类', tone: 'blue' },
+  UPDATE_CATEGORY: { label: '修改分类', tone: 'blue' },
+  DELETE_CATEGORY: { label: '删除分类', tone: 'gray' },
+  REFUND_ORDER: { label: '强制退款', tone: 'darkorange' }
+}
+
+/** 操作类型的全部合法取值（筛选下拉用，顺序即枚举声明顺序） */
+export const AUDIT_OPERATION_TYPES = Object.keys(AUDIT_OPERATION_TYPE_MAP)
+
+export function auditOperationLabel(type) {
+  return AUDIT_OPERATION_TYPE_MAP[type]?.label ?? type ?? '未知操作'
+}
+
+export function auditOperationTone(type) {
+  return AUDIT_OPERATION_TYPE_MAP[type]?.tone ?? 'gray'
+}
+
+/** 审计结果：1-成功, 0-失败（AuditLogVO.java:36-37） */
+export const AUDIT_RESULT_MAP = {
+  1: { label: '成功', tone: 'green' },
+  0: { label: '失败', tone: 'orange' }
+}
+
+export function auditResultLabel(result) {
+  return AUDIT_RESULT_MAP[Number(result)]?.label ?? '未知'
+}
+
+export function auditResultTone(result) {
+  return AUDIT_RESULT_MAP[Number(result)]?.tone ?? 'gray'
+}
+
 // ------------------------------------------------------------------ 业务响应码（按需补充）
 /** 与后端 ErrorCode 对齐，只列出前端会做特殊处理的部分 */
 export const CODE = {

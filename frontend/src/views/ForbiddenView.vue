@@ -2,12 +2,46 @@
 /**
  * 403 无权限页
  *
- * 使用场景：编辑别人的商品被拦下（前端先查 sellerId，后端 PUT 也会用 203 兜底）。
+ * 两类使用场景（文案必须分开，否则会误导）：
+ *   1. 编辑别人的商品被拦下（前端先查 sellerId，后端 PUT 也会用 203 兜底）；
+ *   2. 非管理员访问 /admin/**（路由守卫带 query.from=admin 跳过来；后端对应 code=403）。
+ *      这一场景下说"只有商品发布者本人能操作"就完全对不上了 —— 所以要按场景换文案与出口。
+ *
  * 与 404 页区分开，是为了让「不是找不到，而是没权限」这件事对用户可见。
  */
-import { useRouter } from 'vue-router'
+import { computed } from 'vue'
+import { useRoute, useRouter } from 'vue-router'
+import { ElMessage } from 'element-plus'
+import { useUserStore } from '@/stores/user'
 
+const route = useRoute()
 const router = useRouter()
+const userStore = useUserStore()
+
+/** 是不是"想进管理后台但角色不够"的场景 */
+const isAdminScene = computed(() => route.query.from === 'admin')
+
+const title = computed(() => (isAdminScene.value ? '没有管理权限' : '没有权限访问'))
+
+const descLines = computed(() =>
+  isAdminScene.value
+    ? [
+        '管理后台只对管理员账号开放（管理端接口一律校验 role=1）。',
+        '如需进入，请退出当前账号后用管理员账号登录。'
+      ]
+    : ['这个页面只能由商品发布者本人操作。', '如果你确实需要修改，请使用发布该商品时所用的账号登录。']
+)
+
+/** 场景化出口：管理端场景下"换个账号登录"比"去我的商品"有用得多 */
+async function switchAccount() {
+  await userStore.logout()
+  ElMessage.success('已退出登录，请用管理员账号登录')
+  router.push({ name: 'login' })
+}
+
+function goProducts() {
+  router.push({ name: 'product-my' })
+}
 </script>
 
 <template>
@@ -26,16 +60,18 @@ const router = useRouter()
       </svg>
 
       <h1 class="forbidden__code">403</h1>
-      <h2 class="forbidden__title">没有权限访问</h2>
+      <h2 class="forbidden__title">{{ title }}</h2>
       <p class="forbidden__desc">
-        这个页面只能由商品发布者本人操作。<br />
-        如果你确实需要修改，请使用发布该商品时所用的账号登录。
+        <template v-for="(line, index) in descLines" :key="index">
+          {{ line }}<br />
+        </template>
       </p>
 
       <div class="forbidden__actions">
-        <el-button type="primary" round size="large" @click="router.push({ name: 'product-my' })">
-          去我的商品
+        <el-button v-if="isAdminScene" type="primary" round size="large" @click="switchAccount">
+          换个账号登录
         </el-button>
+        <el-button v-else type="primary" round size="large" @click="goProducts">去我的商品</el-button>
         <el-button round size="large" plain @click="router.push({ name: 'home' })">返回首页</el-button>
       </div>
     </div>

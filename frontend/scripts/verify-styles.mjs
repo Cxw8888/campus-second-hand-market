@@ -52,6 +52,18 @@ const REQUIRED = [
   {
     keyword: '.el-message{',
     guard: 'ElMessage 轻提示（toast）'
+  },
+  {
+    // 第五批新增：管理端商品审核表是**全项目第一次**用 <el-table>。
+    // 模板里的组件由 unplugin-vue-components 自动补 import + 样式，理论上不会漏；
+    // 但"理论上"正是上一批翻车的地方，所以这里给它加一道断言，
+    // 避免出现"表格有数据却没有一点表格样式"这种只有打开页面才看得出来的问题。
+    keyword: '.el-table{',
+    guard: '管理端 el-table 表格（批次 5.1 首次引入）'
+  },
+  {
+    keyword: '.el-table__header',
+    guard: 'el-table 表头单元格样式（el-table-column 的样式入口）'
   }
 ]
 

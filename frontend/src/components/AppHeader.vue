@@ -12,7 +12,7 @@
 import { computed, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
-import { Search, Plus, ArrowDown, User, List, SwitchButton, Bell, Goods } from '@element-plus/icons-vue'
+import { Search, Plus, ArrowDown, User, List, SwitchButton, Bell, Goods, Setting } from '@element-plus/icons-vue'
 import BrandLogo from '@/components/BrandLogo.vue'
 import { useUserStore } from '@/stores/user'
 import { useNotificationStore } from '@/stores/notification'
@@ -87,6 +87,11 @@ async function handleCommand(command) {
   }
   if (command === 'products') {
     router.push({ name: 'product-my' })
+    return
+  }
+  // 管理后台入口（仅管理员可见；普通用户即使手动敲 /admin 也会被路由守卫拦到 403）
+  if (command === 'admin') {
+    router.push({ name: 'admin-product-audit' })
   }
 }
 </script>
@@ -140,7 +145,13 @@ async function handleCommand(command) {
                 <el-dropdown-item command="orders" :icon="List">我的订单</el-dropdown-item>
                 <!-- 学生既买也卖，卖家侧入口和订单入口同等重要 -->
                 <el-dropdown-item command="products" :icon="Goods">我的发布</el-dropdown-item>
-                <el-dropdown-item command="logout" :icon="SwitchButton" divided>退出登录</el-dropdown-item>
+                <!-- 只有 role=1 才出现：管理员和学生看到的下拉菜单本来就该不一样 -->
+                <el-dropdown-item v-if="userStore.isAdmin" command="admin" :icon="Setting" divided>
+                  管理后台
+                </el-dropdown-item>
+                <el-dropdown-item command="logout" :icon="SwitchButton" :divided="!userStore.isAdmin">
+                  退出登录
+                </el-dropdown-item>
               </el-dropdown-menu>
             </template>
           </el-dropdown>

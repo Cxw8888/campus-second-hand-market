@@ -6,10 +6,13 @@ import { pruneEmpty } from '@/utils/format'
 
 /**
  * 查询个人资料（password 永不返回）
+ *
+ * @param {{ silent?: boolean }} [options] silent=true 时不弹错误提示（守卫兜底确认身份时用）
  * @returns {Promise<{id, username, nickname, avatar, phone, email, role, status}>}
+ *   ⚠️ 注意主键字段名是 **id**（UserVO），而 LoginVO 里叫 **userId** —— 合并进 store 时要显式映射
  */
-export function getProfile() {
-  return request.get('/user/profile')
+export function getProfile({ silent = false } = {}) {
+  return request.get('/user/profile', { silent })
 }
 
 /**

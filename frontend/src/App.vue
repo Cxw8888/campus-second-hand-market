@@ -20,7 +20,11 @@ const notificationStore = useNotificationStore()
 /** 这三种页面是「整屏独立布局」，不套导航栏 */
 const STANDALONE_ROUTES = ['login', 'register', 'not-found']
 
-const showHeader = computed(() => !STANDALONE_ROUTES.includes(route.name))
+/**
+ * 管理端（meta.admin）也要收起学生侧导航栏：管理端有自己的 AdminLayout 外壳，
+ * 上面挂着「发布商品 / 我的订单」这类学生功能只会让人困惑。
+ */
+const showHeader = computed(() => !STANDALONE_ROUTES.includes(route.name) && !route.meta?.admin)
 
 /**
  * 未读数轮询放在这里（而不是消息中心页）的原因：
