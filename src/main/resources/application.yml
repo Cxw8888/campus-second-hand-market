@@ -189,6 +189,27 @@ app:
       days: 3
       lock-at-most-for: PT10M
 
+# ---------------- 商品搜索优化 (批次 5.4.4) ----------------
+# 对应 SearchProperties。两块能力各带独立开关，便于单独关闭而无需回滚代码。
+# 注意：本块按批次需求使用顶层 search.*；项目其余业务配置在 app.* 下（见 SearchProperties 类注释）。
+search:
+  cache:
+    # 关闭后每次搜索直达 DB（排查"改了商品却搜不到"时用）
+    enabled: true
+    # 第 4 章要求：搜索结果缓存 60 秒
+    ttl-seconds: 60
+    # TTL 随机抖动上限（秒），防缓存雪崩；0 = 不抖动
+    ttl-jitter-seconds: 10
+  circuit-breaker:
+    # 关闭后同步直查 DB，不做 500ms 超时隔离
+    enabled: true
+    # 第 4 章要求：搜索超时熔断 500ms
+    timeout-ms: 500
+    # 连续超时次数达阈值即开闸（成功一次即清零）
+    failure-threshold: 5
+    # 熔断打开后的持续时长：30 秒
+    open-millis: 30000
+
 logging:
   level:
     root: INFO

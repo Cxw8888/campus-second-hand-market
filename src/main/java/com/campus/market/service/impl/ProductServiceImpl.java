@@ -7,6 +7,7 @@ import com.campus.market.common.constant.RedisKeys;
 import com.campus.market.common.enums.ErrorCode;
 import com.campus.market.common.exception.BusinessException;
 import com.campus.market.common.result.PageResult;
+import com.campus.market.config.properties.SearchProperties;
 import com.campus.market.dto.product.ProductQuery;
 import com.campus.market.dto.product.ProductSaveRequest;
 import com.campus.market.entity.Category;
@@ -21,23 +22,38 @@ import com.campus.market.mapper.ProductMapper;
 import com.campus.market.mapper.UserMapper;
 import com.campus.market.security.UserContext;
 import com.campus.market.service.ProductService;
+import com.campus.market.service.support.SearchCircuitBreaker;
 import com.campus.market.vo.ProductDetailVO;
 import com.campus.market.vo.ProductListVO;
+import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import jakarta.annotation.PreDestroy;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.dao.DataAccessException;
 import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 import org.springframework.util.StringUtils;
 
 import java.math.BigDecimal;
+import java.net.URLEncoder;
+import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.util.Collections;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
+import java.util.concurrent.ArrayBlockingQueue;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Future;
+import java.util.concurrent.RejectedExecutionException;
+import java.util.concurrent.ThreadLocalRandom;
+import java.util.concurrent.ThreadPoolExecutor;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
 import java.util.function.Function;
 import java.util.stream.Collectors;
 
@@ -45,15 +61,27 @@ import java.util.stream.Collectors;
  * 商品服务实现。
  *
  * <h3>列表检索</h3>
- * 多条件过滤 + 排序全部下推 SQL（{@code ORDER BY}），关键字使用 MyBatis-Plus 参数化 {@code like}
- * （生成 {@code CONCAT('%', #{...}, '%')}），<b>严禁字符串拼接</b>；逻辑删除由全局配置自动追加 {@code is_deleted=0}。
+ * 多条件过滤 + 排序全部下推 SQL（{@code ORDER BY}），关键字检索见下节，<b>严禁字符串拼接</b>；
+ * 逻辑删除由全局配置自动追加 {@code is_deleted=0}。
+ *
+ * <h3>关键词检索（批次 5.4.4）</h3>
+ * 关键字非空时走 {@link #keywordSearch}：<b>缓存 → 熔断判断 → FULLTEXT 查询 → LIKE 降级</b>。
+ * <ul>
+ *   <li>FULLTEXT：{@code MATCH(title, description) AGAINST(? IN NATURAL LANGUAGE MODE)}，
+ *       依赖 V2 迁移建的 {@code ft_product_title_desc}（ngram 解析器，中文按 2 字切分）；</li>
+ *   <li>LIKE 降级：捕获 {@link DataAccessException}（索引缺失 / 语法不支持等）后自动改走
+ *       {@code title LIKE %kw% OR description LIKE %kw%}，对调用方完全透明；</li>
+ *   <li>关键字短于 ngram_token_size（2）时<b>直接</b>走 LIKE —— 单字切不出 ngram，
+ *       FULLTEXT 必然搜不到，属于必须绕开的功能性回归；</li>
+ *   <li>无关键字（纯浏览）不经过本路径，保持 5.4.4 之前的 MyBatis-Plus 分页行为。</li>
+ * </ul>
  *
  * <h3>详情可见性分级</h3>
  * 未登录 → 仅 status=1；登录非卖家 / 非管理员 → status IN (0,1,2)（禁止查看待审核 3）；
  * 卖家本人 / 管理员 → 全部状态；不满足 → code=204。
  *
  * <h3>缓存一致性</h3>
- * 读路径 Cache-Aside（{@code product:detail:{id}}），Redis 故障降级直接查库；
+ * 读路径 Cache-Aside（{@code product:detail:{id}}、{@code search:*}），Redis 故障降级直接查库；
  * 写路径严格执行"<b>先更新 DB，再删除缓存</b>"，删除失败仅记录 warn（依赖短 TTL 兜底）。
  */
 @Slf4j
@@ -68,6 +96,52 @@ public class ProductServiceImpl implements ProductService {
      * 这些路径同样需要删除本 Key；在它们接入失效逻辑前，本 TTL 是脏数据的最长存活时间。</p>
      */
     private static final Duration DETAIL_CACHE_TTL = Duration.ofMinutes(5);
+
+    /**
+     * 搜索结果缓存 Key 前缀。
+     *
+     * <p>与 {@code RedisKeys} 里既有 Key 的命名风格保持一致，但<b>刻意不往 common 下加常量</b> ——
+     * 沿用 5.3/5.4 批次里 {@code CategoryServiceImpl} 的做法：新增缓存 Key 只服务本类，
+     * 就收口在本类，避免为了一个字符串去动公共文件。</p>
+     */
+    private static final String SEARCH_CACHE_PREFIX = "search:";
+
+    /**
+     * MySQL {@code ngram_token_size} 的镜像值（默认 2，本机实测为 2）。
+     *
+     * <p>ngram 解析器按 N 元组切词，因此长度 &lt; N 的关键字（典型是单字「书」「鞋」）
+     * 切不出任何 token，FULLTEXT 结果<b>必然为空</b>。这类关键字必须直接走 LIKE，
+     * 否则用户会从"能搜到"变成"永远搜不到"，属于功能性回归。</p>
+     *
+     * <p>写死为常量而不做配置，是因为它必须与<b>数据库服务端变量</b>保持一致，
+     * 前端配置改了反而容易两边不一致；真要调整，应与 DBA 一起改
+     * {@code ngram_token_size} 并同步这里。</p>
+     */
+    private static final int NGRAM_TOKEN_SIZE = 2;
+
+    /**
+     * 搜索超时隔离线程池。
+     *
+     * <p>几个刻意的取舍：</p>
+     * <ul>
+     *   <li><b>daemon 线程</b>：超时后正被 {@code Future.get} 抛弃的 JDBC 查询仍会在池里跑完
+     *       （JDBC 不保证响应 {@code cancel(true)}），非 daemon 线程会让 JVM 无法退出；</li>
+     *   <li><b>有界队列 + AbortPolicy</b>：超时查询会短暂堆积，队列满时直接拒绝、
+     *       由调用方按"过载"处理（见 {@code executeKeywordSearch} 的 RejectedExecutionException 分支），
+     *       绝不能让搜索把线程堆到 OOM；</li>
+     *   <li>池子很小（2~4）是故意的：正常搜索是毫秒级，池子只用来承担"少数慢查询"的隔离，
+     *       真出现大面积超时会由熔断先一步挡住。</li>
+     * </ul>
+     */
+    private final ExecutorService searchExecutor = new ThreadPoolExecutor(
+            2, 4, 60L, TimeUnit.SECONDS,
+            new ArrayBlockingQueue<>(16),
+            runnable -> {
+                Thread thread = new Thread(runnable, "cm-search");
+                thread.setDaemon(true);
+                return thread;
+            },
+            new ThreadPoolExecutor.AbortPolicy());
 
     /** 未完成订单状态：存在这些订单的商品禁止删除（code=207）。 */
     private static final List<Integer> UNFINISHED_ORDER_STATUS = List.of(
@@ -84,15 +158,30 @@ public class ProductServiceImpl implements ProductService {
     private final UserMapper userMapper;
     private final StringRedisTemplate stringRedisTemplate;
     private final ObjectMapper objectMapper;
+    private final SearchProperties searchProperties;
+    private final SearchCircuitBreaker searchCircuitBreaker;
+
+    /** 容器关闭时收掉搜索线程池（daemon 线程虽不阻塞退出，显式关闭更干净）。 */
+    @PreDestroy
+    void shutdownSearchExecutor() {
+        searchExecutor.shutdownNow();
+    }
 
     // ================================================================ 查询
 
     @Override
     public PageResult<ProductListVO> list(ProductQuery query) {
-        LambdaQueryWrapper<Product> wrapper = buildListWrapper(query);
-        // 游客 / 买家视角：只返回上架中商品
-        wrapper.eq(Product::getStatus, ProductStatus.ON_SALE);
-        return pageQuery(query, wrapper);
+        String keyword = query.getKeyword() == null ? null : query.getKeyword().trim();
+        if (!StringUtils.hasText(keyword)) {
+            // 无关键字（纯浏览 / 只按分类价格筛）：保持 5.4.4 之前的 MyBatis-Plus 分页路径，
+            // 不加缓存也不加超时熔断。理由是"新商品上架后应立刻可见"比"省一次查询"更重要，
+            // 60 秒的浏览列表缓存会让刚审核通过的商品延迟出现。
+            LambdaQueryWrapper<Product> wrapper = buildListWrapper(query);
+            // 游客 / 买家视角：只返回上架中商品
+            wrapper.eq(Product::getStatus, ProductStatus.ON_SALE);
+            return pageQuery(query, wrapper);
+        }
+        return keywordSearch(query, keyword);
     }
 
     @Override
@@ -281,21 +370,236 @@ public class ProductServiceImpl implements ProductService {
     private PageResult<ProductListVO> pageQuery(ProductQuery query, LambdaQueryWrapper<Product> wrapper) {
         Page<Product> page = new Page<>(query.current(), query.pageSize());
         Page<Product> result = productMapper.selectPage(page, wrapper);
-        List<Product> records = result.getRecords();
-        List<ProductListVO> voList;
+        // 注意：不能直接返回 PageResult.empty，否则翻到超出末页时会丢失 total
+        return PageResult.of(result.getTotal(), result.getCurrent(), result.getSize(),
+                toVoList(result.getRecords()));
+    }
+
+    /**
+     * Entity 列表 → VO 列表（批量补分类名与卖家展示字段，避免 N+1）。
+     *
+     * <p>被两条列表路径共用：MyBatis-Plus 分页（{@link #pageQuery}）与关键词检索
+     * （{@link #runKeywordQuery}）。抽出来是为了保证两条路径产出的 VO <b>逐字段一致</b>。</p>
+     */
+    private List<ProductListVO> toVoList(List<Product> records) {
         if (records == null || records.isEmpty()) {
-            // 注意：不能直接返回 PageResult.empty，否则翻到超出末页时会丢失 total
-            voList = Collections.emptyList();
-        } else {
-            Map<Long, String> categoryNames = loadCategoryNames(records);
-            Map<Long, User> sellers = loadSellers(records);
-            voList = records.stream()
-                    .map(product -> fill(new ProductListVO(), product,
-                            categoryNames.get(product.getCategoryId()),
-                            sellers.get(product.getUserId())))
-                    .collect(Collectors.toList());
+            return Collections.emptyList();
         }
-        return PageResult.of(result.getTotal(), result.getCurrent(), result.getSize(), voList);
+        Map<Long, String> categoryNames = loadCategoryNames(records);
+        Map<Long, User> sellers = loadSellers(records);
+        return records.stream()
+                .map(product -> fill(new ProductListVO(), product,
+                        categoryNames.get(product.getCategoryId()),
+                        sellers.get(product.getUserId())))
+                .collect(Collectors.toList());
+    }
+
+    // ================================================================ 关键词检索（批次 5.4.4）
+
+    /**
+     * 关键词检索主流程：<b>缓存 → 熔断 → FULLTEXT → LIKE 降级</b>。
+     *
+     * <p>读缓存放在熔断之前：熔断期间若命中缓存就直接给真实结果，比返回空列表更好。</p>
+     */
+    private PageResult<ProductListVO> keywordSearch(ProductQuery query, String keyword) {
+        SearchProperties.Cache cacheConfig = searchProperties.getCache();
+        String cacheKey = cacheConfig.isEnabled() ? buildSearchCacheKey(query, keyword) : null;
+
+        if (cacheKey != null) {
+            PageResult<ProductListVO> cached = readSearchCache(cacheKey);
+            if (cached != null) {
+                return cached;
+            }
+        }
+
+        SearchProperties.CircuitBreaker breakerConfig = searchProperties.getCircuitBreaker();
+        if (breakerConfig.isEnabled() && searchCircuitBreaker.isOpen()) {
+            // 熔断期间直接兜底，不打 DB。注意：这条空结果**不写缓存**，
+            // 否则一次 30 秒的熔断会被 60 秒的缓存"续命"，比熔断本身活得更久。
+            log.warn("搜索已熔断，直接返回空列表（搜索繁忙，请稍后重试）: keyword={}, timeoutMs={}, openMillis={}",
+                    keyword, breakerConfig.getTimeoutMs(), breakerConfig.getOpenMillis());
+            return PageResult.empty(query.current(), query.pageSize());
+        }
+
+        PageResult<ProductListVO> result = executeKeywordSearch(query, keyword);
+        if (result == null) {
+            // 超时 / 线程池过载：返回空列表且不写缓存（理由同上）
+            return PageResult.empty(query.current(), query.pageSize());
+        }
+        if (cacheKey != null) {
+            writeSearchCache(cacheKey, result);
+        }
+        return result;
+    }
+
+    /**
+     * 在超时预算内执行检索。
+     *
+     * @return 正常结果；返回 {@code null} 表示"超时 / 过载"，调用方应返回空列表且不要缓存
+     */
+    private PageResult<ProductListVO> executeKeywordSearch(ProductQuery query, String keyword) {
+        SearchProperties.CircuitBreaker config = searchProperties.getCircuitBreaker();
+        if (!config.isEnabled()) {
+            // 开关关闭：同步直查，不做 500ms 超时隔离（排障时用）
+            return doKeywordSearch(query, keyword);
+        }
+
+        Future<PageResult<ProductListVO>> future;
+        try {
+            future = searchExecutor.submit(() -> doKeywordSearch(query, keyword));
+        } catch (RejectedExecutionException e) {
+            // 线程池被打满（前面的慢查询还占着线程）→ 按过载处理，等同超时
+            recordSearchTimeout(keyword, "搜索线程池已满（过载）");
+            return null;
+        }
+
+        try {
+            PageResult<ProductListVO> result = future.get(config.getTimeoutMs(), TimeUnit.MILLISECONDS);
+            searchCircuitBreaker.recordSuccess();
+            return result;
+        } catch (TimeoutException e) {
+            // 只取消 Future；JDBC 查询不保证响应中断，会在池里跑完（daemon 线程，不影响退出）
+            future.cancel(true);
+            recordSearchTimeout(keyword, "查询超过 " + config.getTimeoutMs() + "ms");
+            return null;
+        } catch (InterruptedException e) {
+            future.cancel(true);
+            Thread.currentThread().interrupt();
+            recordSearchTimeout(keyword, "查询被中断");
+            return null;
+        } catch (ExecutionException e) {
+            // 能走到这里说明 FULLTEXT 与 LIKE **两条路都失败了**（doKeywordSearch 已吞掉前者）
+            Throwable cause = e.getCause() == null ? e : e.getCause();
+            log.warn("搜索执行失败（FULLTEXT 与 LIKE 均未成功）: keyword={}, err={}", keyword, cause.getMessage());
+            if (cause instanceof RuntimeException runtimeException) {
+                throw runtimeException;
+            }
+            throw new BusinessException(ErrorCode.SYSTEM_ERROR, "搜索失败，请稍后重试");
+        }
+    }
+
+    /**
+     * 实际执行检索：先 FULLTEXT，失败则 LIKE 降级。
+     *
+     * <p>只捕获 {@link DataAccessException}（Spring 对 SQLException 的统一转换）：
+     * 索引不存在、ngram 解析器不可用、SQL 语法不被支持都落在这里。其它异常（如 NPE）
+     * 属于代码缺陷，必须让它冒出去，不能被"降级"掩盖。</p>
+     */
+    private PageResult<ProductListVO> doKeywordSearch(ProductQuery query, String keyword) {
+        if (supportsFulltext(keyword)) {
+            try {
+                return runKeywordQuery(query, keyword, true);
+            } catch (DataAccessException e) {
+                log.warn("FULLTEXT 检索不可用，降级为 LIKE: keyword={}, err={}", keyword, e.getMessage());
+            }
+        }
+        return runKeywordQuery(query, keyword, false);
+    }
+
+    /**
+     * 关键字是否适合走 FULLTEXT。
+     *
+     * <p>长度 &lt; ngram_token_size 时切不出 token（单字搜索必然为空），直接走 LIKE。</p>
+     */
+    private boolean supportsFulltext(String keyword) {
+        return keyword.codePointCount(0, keyword.length()) >= NGRAM_TOKEN_SIZE;
+    }
+
+    /** 按指定路径查一次（count + select），并组装成与浏览列表同构的 PageResult。 */
+    private PageResult<ProductListVO> runKeywordQuery(ProductQuery query, String keyword, boolean fulltext) {
+        long total = fulltext
+                ? productMapper.countFulltext(query, keyword)
+                : productMapper.countLike(query, keyword);
+
+        List<Product> records = Collections.emptyList();
+        if (total > 0) {
+            int size = (int) query.pageSize();
+            int offset = (int) Math.max(0L, (query.current() - 1L) * size);
+            records = fulltext
+                    ? productMapper.searchFulltext(query, keyword, offset, size)
+                    : productMapper.searchLike(query, keyword, offset, size);
+        }
+        return PageResult.of(total, query.current(), query.pageSize(), toVoList(records));
+    }
+
+    /** 记录一次超时并处理熔断开闸日志。 */
+    private void recordSearchTimeout(String keyword, String reason) {
+        boolean opened = searchCircuitBreaker.recordTimeout();
+        if (opened) {
+            log.error("搜索连续超时达阈值，熔断开闸 {}ms（期间直接返回空列表）: keyword={}, reason={}",
+                    searchProperties.getCircuitBreaker().getOpenMillis(), keyword, reason);
+        } else {
+            log.warn("搜索超时（第 {} 次连续）: keyword={}, reason={}",
+                    searchCircuitBreaker.consecutiveTimeouts(), keyword, reason);
+        }
+    }
+
+    /**
+     * 组装搜索缓存 Key。
+     *
+     * <p>Key 里必须带上<b>所有会影响结果的维度</b>：关键字、分类、价格区间、成色、交易方式、
+     * 排序字段与方向、分页。少带一个维度就会出现"换了排序却返回上一次顺序"这类诡异现象 ——
+     * 这是缓存 Key 设计最容易漏的地方。</p>
+     *
+     * <p>关键字做 URL-safe 编码：中文可直接进 Key，但空格、{@code *}、{@code :} 等字符会破坏可读性
+     * 甚至与分隔符混淆，编码后一律变成安全的 ASCII。</p>
+     *
+     * <p><b>编码语义备忘</b>（实测，和直觉不同）：{@code URLEncoder} 把空格编成 {@code +}，
+     * 把 {@code +} 编成 {@code %2B}，把 {@code :} 编成 {@code %3A}，但<b>不编码</b> {@code *}。
+     * 对本场景而言这就够了：{@code ':'} 与 {@code '+'} 一定被编码，所以关键字<b>不可能伪造出
+     * 分隔符</b>（"a:b" 与 "a b" 不会撞 Key）；剩下的 {@code *} 对 Redis Key 完全无害
+     * （只有 KEYS 通配才特殊，我们从不按通配读搜索缓存）。</p>
+     *
+     * <p><b>可以安全共享</b>：{@code list()} 恒定只返回 {@code status=1}，且不使用
+     * {@link UserContext}，因此结果与"谁在查"无关，不存在越权读到他人可见性的问题。</p>
+     */
+    private String buildSearchCacheKey(ProductQuery query, String keyword) {
+        String encodedKeyword = URLEncoder.encode(keyword, StandardCharsets.UTF_8);
+        return SEARCH_CACHE_PREFIX
+                + encodedKeyword + ':'
+                + query.getCategoryId() + ':'
+                + query.getMinPrice() + ':'
+                + query.getMaxPrice() + ':'
+                + query.getConditionLevel() + ':'
+                + query.getTradeType() + ':'
+                + (query.getSortBy() == null ? "create_time" : query.getSortBy()) + ':'
+                + (query.getOrder() == null ? "desc" : query.getOrder()) + ':'
+                + query.current() + ':'
+                + query.pageSize();
+    }
+
+    /** 读搜索缓存：任何异常（连接失败 / 反序列化失败）都降级为直接查库。 */
+    private PageResult<ProductListVO> readSearchCache(String key) {
+        try {
+            String json = stringRedisTemplate.opsForValue().get(key);
+            if (!StringUtils.hasText(json)) {
+                return null;
+            }
+            return objectMapper.readValue(json, new TypeReference<PageResult<ProductListVO>>() {
+            });
+        } catch (Exception e) {
+            log.warn("搜索缓存读取降级, 直接查库: key={}, err={}", key, e.getMessage());
+            return null;
+        }
+    }
+
+    /**
+     * 写搜索缓存：TTL = 配置值 + 0~jitter 秒随机抖动（防雪崩）。
+     *
+     * <p>空结果也写入 —— 这是<b>防缓存穿透</b>的关键：否则"不存在的词"每次都会实打实查一遍库。</p>
+     */
+    private void writeSearchCache(String key, PageResult<ProductListVO> result) {
+        try {
+            SearchProperties.Cache config = searchProperties.getCache();
+            long jitter = config.getTtlJitterSeconds() <= 0
+                    ? 0L
+                    : ThreadLocalRandom.current().nextLong(config.getTtlJitterSeconds() + 1);
+            Duration ttl = Duration.ofSeconds(config.getTtlSeconds() + jitter);
+            stringRedisTemplate.opsForValue()
+                    .set(key, objectMapper.writeValueAsString(result), ttl);
+        } catch (Exception e) {
+            log.warn("搜索缓存写入降级: key={}, err={}", key, e.getMessage());
+        }
     }
 
     private Map<Long, String> loadCategoryNames(List<Product> records) {
