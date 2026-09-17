@@ -55,6 +55,7 @@ import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
 import java.util.function.Function;
+import java.util.regex.Pattern;
 import java.util.stream.Collectors;
 
 /**
@@ -71,8 +72,10 @@ import java.util.stream.Collectors;
  *       依赖 V2 迁移建的 {@code ft_product_title_desc}（ngram 解析器，中文按 2 字切分）；</li>
  *   <li>LIKE 降级：捕获 {@link DataAccessException}（索引缺失 / 语法不支持等）后自动改走
  *       {@code title LIKE %kw% OR description LIKE %kw%}，对调用方完全透明；</li>
- *   <li>关键字短于 ngram_token_size（2）时<b>直接</b>走 LIKE —— 单字切不出 ngram，
- *       FULLTEXT 必然搜不到，属于必须绕开的功能性回归；</li>
+ *   <li><b>走 LIKE 而非 FULLTEXT 的两种关键字</b>（见 {@link #supportsFulltext}）：
+ *       ① 长度短于 ngram_token_size（2）的单字（「书」「a」）——切不出 ngram，FULLTEXT 必然为空；
+ *       ② 纯 ASCII 关键字（如 {@code keyboard}）——ngram 对拉丁文会因共享二元组而误召回
+ *       （实测命中过「Nike 运动鞋」）；</li>
  *   <li>无关键字（纯浏览）不经过本路径，保持 5.4.4 之前的 MyBatis-Plus 分页行为。</li>
  * </ul>
  *
@@ -118,6 +121,13 @@ public class ProductServiceImpl implements ProductService {
      * {@code ngram_token_size} 并同步这里。</p>
      */
     private static final int NGRAM_TOKEN_SIZE = 2;
+
+    /**
+     * CJK（汉字）字符判定：命中任意一个 U+4E00–U+9FFF 即为"含中文"。
+     *
+     * <p>用来决定关键字走 FULLTEXT 还是 LIKE，见 {@link #supportsFulltext}。</p>
+     */
+    private static final Pattern CJK_PATTERN = Pattern.compile("[\\u4e00-\\u9fff]");
 
     /**
      * 搜索超时隔离线程池。
@@ -497,12 +507,28 @@ public class ProductServiceImpl implements ProductService {
     }
 
     /**
-     * 关键字是否适合走 FULLTEXT。
+     * 关键字是否适合走 FULLTEXT（批次 5.4.5 收紧了判据）。
      *
-     * <p>长度 &lt; ngram_token_size 时切不出 token（单字搜索必然为空），直接走 LIKE。</p>
+     * <p>两个条件<b>必须同时满足</b>：</p>
+     * <ol>
+     *   <li><b>长度 ≥ ngram_token_size（2）</b>：ngram 按 N 元组切词，长度不足 N 的关键字
+     *       （单字「书」「鞋」、单字母「a」）切不出任何 token，FULLTEXT 结果必然为空 ——
+     *       必须走 LIKE，否则用户会从"搜得到"变成"永远搜不到"；</li>
+     *   <li><b>含 CJK（汉字）字符</b>：ngram 是为中日韩设计的，用在拉丁文上会明显放宽召回。
+     *       实测（5.4.4）：{@code keyword=keyboard} 命中「Nike 运动鞋 42 码」——
+     *       因为 ngram 把 keyboard 切成 ke/ey/yb/bo/oa/ar/rd，而 Nike 也含 ke。
+     *       中文没有这个问题（实测「C语言」「机械键盘」都准确），所以纯 ASCII 关键字
+     *       一律交给 LIKE：牺牲一点性能换取"不返回毫不相关的商品"。</li>
+     * </ol>
+     *
+     * <p>代价说明：纯 ASCII 关键字走 LIKE 时不再有相关度排序，且耗时随表大小线性增长。
+     * 按第 4 章的商品量上限（5000 条）实测仍在十几毫秒量级，可接受。</p>
      */
     private boolean supportsFulltext(String keyword) {
-        return keyword.codePointCount(0, keyword.length()) >= NGRAM_TOKEN_SIZE;
+        if (keyword.codePointCount(0, keyword.length()) < NGRAM_TOKEN_SIZE) {
+            return false;
+        }
+        return CJK_PATTERN.matcher(keyword).find();
     }
 
     /** 按指定路径查一次（count + select），并组装成与浏览列表同构的 PageResult。 */

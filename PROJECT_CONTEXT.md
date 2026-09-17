@@ -1,4 +1,5 @@
-校园二手交易平台 - 项目需求与设计文档 (AI Context 正式封版 V26)
+校园二手交易平台 - 项目需求与设计文档 (AI Context 正式封版 V27)
+V27 核心变更：新增商品搜索优化（FULLTEXT ngram + LIKE 降级 + 60 秒缓存 + 500ms 熔断，见 3.4.1）、分类逻辑删除让位改名机制与两层缓存说明（见 3.4.2）、唯一键冲突返回 code=100（见 5.1）。技术设计不变，仅追加实现约定与踩坑记录。
 V23 核心变更：修复 V22 报告中的 1 项 Blocker（第 7 章与正文不一致）+ 3 项 Major（毕设 MVP 分级、设计图清单、外部依赖降级）+ 3 项 Minor（弱密码简化、Prometheus 可选、创新点定位）。技术设计不变，仅做毕设适配裁剪与文档自洽性修复。
 
 1. 项目概述
@@ -542,6 +543,74 @@ Key：product:detail:{productId}。
 
 删除失败或并发读导致短期脏数据，必须配合延迟双删或短 TTL 兜底。
 
+### 3.4.1 商品搜索缓存与熔断
+
+商品关键词检索（`GET /api/v1/product/list?keyword=`）在 Redis 缓存之外还有超时熔断保护。
+
+**缓存**
+- Redis Key：`search:{keyword}:{categoryId}:{minPrice}:{maxPrice}:{conditionLevel}:{tradeType}:{sortBy}:{order}:{page}:{size}`
+- keyword 用 URL 编码（`URLEncoder`），避免空格、冒号等字符与 Key 分隔符混淆
+- Key 必须覆盖**全部会改变结果的维度**（含排序字段/方向与分页）：少带一个维度就会出现"换了排序却返回上一次顺序"
+- TTL 60 秒 + 0~10 秒随机抖动（防雪崩）
+- 空结果同样缓存（防穿透）
+- **搜索缓存没有主动失效**：商品发布/编辑/下架/审核通过后，检索结果最长 60 秒后才更新，由 TTL 兜底
+- **熔断 / 超时产生的兜底空结果不写缓存**：否则一次 30 秒的熔断会被 60 秒的缓存"续命"，比熔断本身活得更久
+
+**熔断**
+- 单次搜索超时 500ms（独立 daemon 线程池 + `Future.get`；超时只取消 Future，JDBC 查询不保证响应中断）
+- 连续 5 次超时触发熔断，熔断时长 30 秒（`AtomicInteger` + `volatile` 时间戳，未引入 Resilience4j）
+- 熔断期间直接返回空列表，只记 `log.warn`；**响应结构不变**，因此前端表现为"空结果"，没有专门的"搜索繁忙"文案
+- 成功一次即清零连续超时计数；**开闸时计数也清零**，避免熔断时长被"续杯"
+
+**搜索路径（FULLTEXT 与 LIKE 的取舍）**
+- 关键字**含 CJK（U+4E00–U+9FFF）且长度 ≥ ngram_token_size（默认 2）** → FULLTEXT：
+  `MATCH(title, description) AGAINST(? IN NATURAL LANGUAGE MODE)`，并按相关度降序排序
+  （**相关度优先于用户选择的排序字段**：选"价格从低到高"时，先按相关度、相关度相同再按价格）
+- 关键字**纯 ASCII**（如 `keyboard`）→ LIKE：ngram 会把拉丁词切成 2 元组，共享二元组的无关词会互相命中
+  （实测 keyword=keyboard 命中「Nike 运动鞋 42 码」，两者共享 `ke`）；中文没有这个问题
+- **单字关键字**（「书」「a」）→ LIKE：长度不足 ngram_token_size，切不出 token，FULLTEXT 必然为空
+- **无关键字**（纯浏览或只按分类/价格筛选）→ 仍走 MyBatis-Plus 分页，**不缓存也不熔断**（新上架商品必须立刻可见）
+- FULLTEXT 抛 `DataAccessException`（索引缺失 / 语法不支持等）→ 自动降级 LIKE，仅 `log.warn`，不抛给调用方；
+  若 LIKE 也失败则原样抛出（不把真故障伪装成空结果）
+
+**配置**（application.yml，顶层 `search.*`）
+```
+search.cache.enabled: true
+search.cache.ttl-seconds: 60
+search.cache.ttl-jitter-seconds: 10
+search.circuit-breaker.enabled: true
+search.circuit-breaker.timeout-ms: 500
+search.circuit-breaker.failure-threshold: 5
+search.circuit-breaker.open-millis: 30000
+```
+两个开关可独立关闭（关熔断=同步直查 DB；关缓存=每次打库），用于排障。
+
+**索引**：`V2__add_fulltext_index.sql` 建 `FULLTEXT INDEX ft_product_title_desc (title, description) WITH PARSER ngram`；
+不改 `ngram_token_size`（默认 2），不删除任何既有索引。首次建 FULLTEXT 时 InnoDB 会为 `FTS_DOC_ID` 重建表（5000 行量级为秒级）。
+
+### 3.4.2 分类缓存与让位改名
+
+分类列表（`GET /api/v1/category/list`，**C 端与管理端是同一个接口**，管理端没有独立的分类列表接口）有**两层缓存**：
+
+- 后端 Redis：`product:category:list`，TTL 10 分钟；`create / update / delete / migrate` 后**主动 DEL**
+  （先更新 DB 再删缓存），Redis 故障时降级为直接查库并记 warn
+- 前端 localStorage：`cm.category.cache`，TTL 24 小时，值 `{list, loadedAt}`，`loadedAt` 是毫秒时间戳；
+  **无主动失效**，未过期时直接用缓存、不发请求
+- 因此**管理员变更分类后，学生端最迟 24 小时可见**（或在缓存过期 / 手动刷新后立刻生效）。
+  演示或答辩前如需立即生效：清 Redis 的 `product:category:list` + 让学生端硬刷新（清 `cm.category.cache`）
+
+分类删除采用**逻辑删除 + 让位改名**：
+
+- `uk_category_name` 是**单列唯一索引**（不含 `is_deleted`），逻辑删除的行会一直占着名字；
+  而重名预检走 MyBatis-Plus 会自动追加 `is_deleted = 0`，两边口径不一致 → 新建同名分类会撞唯一索引
+- 修复：删除时先把 name 改为 `{原名}#deleted{id}`，再置 `is_deleted = 1`（与审计写入同一事务）
+- 后缀必带 id：同名分类被反复删除也不会互撞；原名已含 `#deleted` 时不重复追加（幂等）
+- 边界：原名达 50 字（`VARCHAR(50)` 上限）时按"后缀优先"截断原名前缀，保证总长 ≤ 50，
+  否则改名本身会因超长报错（把 500 从一个地方搬到另一个地方）
+- 改名会触发 `update_time` 自动填充（符合全局字段规则）；`sort` 不受影响
+- 原名可从新名**无损还原**（去掉 `#deleted{id}` 后缀），审计与排查不丢信息
+- 修复后同名分类可正常重建（接口实测通过）
+
 3.5 多线程、线程池、站内信与测试
 线程池：自定义 ThreadPoolTaskExecutor，参数依据：核心 8（4 核 CPU × 2 IO 密集型经验值），最大 16（突发预留），队列 200（缓冲上限），拒绝策略 CallerRunsPolicy，严禁 Executors 快捷方法。启动类加 @EnableAsync。
 
@@ -725,6 +794,29 @@ Spring Validation 注解校验失败统一映射 code=100，msg 携带具体字�
 | 401 | 认证 | 未登录或 Token 失效（HTTP 401） |
 | 403 | 授权 | 无管理员权限 |
 | 500 | 系统 | 服务器内部错误 |
+
+### 5.1 唯一键冲突错误码
+
+唯一键冲突（`DuplicateKeyException`）统一映射为 **code=100「参数校验」**，msg 携带具体字段错误；**不再返回 500**。
+（背景：唯一索引是数据库层约束，业务层的前置查重看不全它 —— 例如分类名在"已逻辑删除但仍占用唯一索引"时，
+预检会放行，直到 INSERT 才抛异常。）
+
+已知唯一键映射（索引名取自 `V1__init.sql` 中实际存在的唯一键，逐条对应）：
+
+| 唯一索引 | msg |
+| --- | --- |
+| `uk_category_name` | 分类名称已存在 |
+| `uk_user_username` | 该账号已被注册 |
+| `uk_user_email` | 该邮箱已被注册 |
+| `uk_order_no` | 订单号重复，请重试 |
+| `uk_user_product` | 该商品已在收藏列表中 |
+| 未知 / 解析不出索引名 | 数据已存在，请检查唯一字段后重试 |
+
+- 索引名从异常消息里的 `for key '表名.索引名'` 解析（沿 cause 链查找）；解析失败退化为通用文案，
+  **绝不把 SQL 片段、表名或约束名返回给前端**
+- 相邻约定：**未匹配到任何接口的路径**（`NoResourceFoundException`）同样映射为 code=100
+  「请求的接口不存在: {url}」，不返回 500。这里沿用现有错误码而不新增 404 ——
+  本章错误码表没有 404，且规定"业务接口一律 HTTP 200，业务结果由 body.code 区分，仅未登录/Token 失效返回 HTTP 401"
 
 ## 6. 验收标准与关键接口测试用例
 

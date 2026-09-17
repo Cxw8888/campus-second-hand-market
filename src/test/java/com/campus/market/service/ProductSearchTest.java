@@ -221,6 +221,40 @@ class ProductSearchTest {
         verify(productMapper, never()).searchFulltext(any(), anyString(), anyInt(), anyInt());
     }
 
+    @Test
+    @DisplayName("⑭ 路由判据（5.4.5）：纯 ASCII 关键字走 LIKE，含 CJK 才走 FULLTEXT")
+    void asciiKeywordShouldBypassFulltext() {
+        // 两条路径都给出"有结果"的桩，确保断言的是**路由**而不是"有没有数据"
+        when(productMapper.countLike(any(), anyString())).thenReturn(1L);
+        when(productMapper.searchLike(any(), anyString(), anyInt(), anyInt()))
+                .thenReturn(List.of(product(11L, "命中商品", new BigDecimal("9.90"))));
+        when(productMapper.countFulltext(any(), anyString())).thenReturn(1L);
+        when(productMapper.searchFulltext(any(), anyString(), anyInt(), anyInt()))
+                .thenReturn(List.of(product(11L, "命中商品", new BigDecimal("9.90"))));
+
+        // ---------- 场景 1：多字纯 ASCII → LIKE ----------
+        // ngram 会把 keyboard 切成 ke/ey/yb/bo/oa/ar/rd，而「Nike」也含 ke，
+        // 于是 5.4.4 实测出现「搜 keyboard 命中 Nike 运动鞋」的假阳性
+        productService.list(query("keyboard", 1, 10));
+        verify(productMapper).searchLike(any(), eq("keyboard"), anyInt(), anyInt());
+        verify(productMapper, never()).searchFulltext(any(), eq("keyboard"), anyInt(), anyInt());
+
+        // ---------- 场景 2：单字 ASCII → LIKE（5.4.4 已实现） ----------
+        productService.list(query("a", 1, 10));
+        verify(productMapper).searchLike(any(), eq("a"), anyInt(), anyInt());
+        verify(productMapper, never()).searchFulltext(any(), eq("a"), anyInt(), anyInt());
+
+        // ---------- 场景 3：含 CJK 多字 → FULLTEXT ----------
+        productService.list(query("机械键盘", 1, 10));
+        verify(productMapper).searchFulltext(any(), eq("机械键盘"), anyInt(), anyInt());
+        verify(productMapper, never()).searchLike(any(), eq("机械键盘"), anyInt(), anyInt());
+
+        // ---------- 场景 4：含 CJK 单字 → LIKE（5.4.4 已实现） ----------
+        productService.list(query("书", 1, 10));
+        verify(productMapper).searchLike(any(), eq("书"), anyInt(), anyInt());
+        verify(productMapper, never()).searchFulltext(any(), eq("书"), anyInt(), anyInt());
+    }
+
     // ================================================================ 缓存
 
     @Test
