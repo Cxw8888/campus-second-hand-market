@@ -176,6 +176,33 @@ src/
   `await new Promise(r => setTimeout(r, 500))` 后只断言
   「overlay 隐藏 / dialog 不可见」这类终态。
 
+## 构建与测试环境约束
+
+### 构建环境约束（无 Maven 环境时）
+
+本机可能没有在 PATH 上的 Maven / JDK，项目由 IntelliJ 构建，
+JDK 可能在 `C:\Users\chen\.jdks\`，`.m2` 仓库完整可用。
+
+用裸 javac 编译时必须显式加 `-parameters`，否则所有 `@PathVariable`
+接口全返回 500（Spring 抛 `IllegalArgumentException: Name for argument
+of type [...] not specified... Ensure that the compiler uses the
+'-parameters' flag`）。Maven 的 spring-boot-starter-parent 默认带这个
+flag，裸 javac 不带。
+
+5.4.2 实测时曾因此误判为"改动炸了"，实际是编译方式问题。
+
+### 测试环境约束
+
+1. Mockito 的 inline mock maker 在某些沙箱无法自附加
+   （`Could not self-attach to current VM using external process`）。
+   跑测试时加 JVM 参数：`-Djdk.attach.allowAttachSelf=true`。
+
+2. 纯 Mockito 单测里没有 MyBatis-Plus 运行时：
+   `lambdaQuery().select(Product::getId)` 会立即翻译列名，
+   缺 TableInfo 缓存就报 `can not find lambda cache`。
+   测试里用 `TableInfoHelper.initTableInfo(...)` 补齐。
+   （`eq(...)` 是懒翻译，不受影响。）
+
 ## 需求原文勘误
 - ORDER_STATUS_MAP[2].label 实际是「已发货待收货」，不是「已发货」。
   需求提示词若写「已发货(2)」，以 constants.js 为准，不要改全局字典
