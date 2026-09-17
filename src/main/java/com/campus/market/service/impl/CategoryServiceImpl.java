@@ -46,6 +46,29 @@ public class CategoryServiceImpl implements CategoryService {
      */
     private static final String CATEGORY_LIST_CACHE_KEY = "product:category:list";
 
+    /**
+     * 逻辑删除时给 {@code name} 加的后缀：{@code #deleted{id}}。
+     *
+     * <p>为什么需要它（批次 5.4.2 缺陷修复）：{@code uk_category_name(name)} 是**单列唯一索引**，
+     * 不含 {@code is_deleted}，所以逻辑删除的行会一直占着名字。而本项目的重名预检
+     * {@link #existsByName} 走 MyBatis-Plus，会自动追加 {@code is_deleted = 0} ——
+     * 对已删除的分类返回 count=0（"名字可用"），于是 INSERT 才撞上唯一索引抛
+     * {@code DuplicateKeyException} → 表现为 code=500，管理员**永远无法再创建同名分类**。
+     *
+     * <p>删除时改名让位，等于把名字还给后来的分类；原名仍可从新名里还原
+     * （去掉后缀即可），审计与排查都不丢信息。</p>
+     */
+    private static final String DELETED_NAME_SUFFIX = "#deleted";
+
+    /**
+     * 分类名长度上限，与 {@code CategorySaveRequest} 的 {@code @Size(max = 50)}
+     * 和 {@code tb_category.name VARCHAR(50)} 严格对齐。
+     *
+     * <p>改名时若原名已达 50 字，直接拼后缀会超出列长度 → 又变成一个 500。
+     * 因此按"后缀优先"截断原名的头部。</p>
+     */
+    private static final int CATEGORY_NAME_MAX_LENGTH = 50;
+
     /** 分类列表缓存 TTL：读多写少，写操作会主动失效，10 分钟兜底防止删除失败导致长期脏数据。 */
     private static final Duration CATEGORY_CACHE_TTL = Duration.ofMinutes(10);
 
@@ -120,6 +143,14 @@ public class CategoryServiceImpl implements CategoryService {
         if (productCount != null && productCount > 0) {
             throw new BusinessException(ErrorCode.CATEGORY_HAS_PRODUCT);
         }
+        // ① 先改名让位：释放 uk_category_name(name) 对该名字的占用，否则同名分类再也建不出来
+        //    （只 setName，其余字段为 null → MyBatis-Plus 不会覆盖 sort；update_time 由
+        //     MetaObjectHandler 自动填充，符合全局字段规则）
+        Category renamed = new Category();
+        renamed.setId(id);
+        renamed.setName(deletedName(category.getName(), id));
+        categoryMapper.updateById(renamed);
+        // ② 再逻辑删除（is_deleted=1）；①② 与审计写入同处一个事务
         categoryMapper.deleteById(id);
         evictListCache();
     }
@@ -147,6 +178,10 @@ public class CategoryServiceImpl implements CategoryService {
                 .filter(Objects::nonNull)
                 .collect(Collectors.toList());
         if (productIds.isEmpty()) {
+            // 没有任何商品需要迁移。这次调用本身不改业务数据，所以缓存不会脏；
+            // 之所以仍要失效一次，是为了遵守本类的统一约定「任何写操作路径结束后都失效列表缓存」——
+            // 否则以后有人在 return 之前加了写逻辑（例如顺手改分类名），就会漏掉失效。
+            evictListCache();
             return 0;
         }
         // 级联迁移：UPDATE tb_product SET category_id = ? WHERE category_id = ? AND is_deleted = 0
@@ -177,6 +212,29 @@ public class CategoryServiceImpl implements CategoryService {
         vo.setName(category.getName());
         vo.setSort(category.getSort());
         return vo;
+    }
+
+    /**
+     * 生成逻辑删除后的"让位名字"：{@code 原名#deleted{id}}。
+     *
+     * <ul>
+     *   <li>后缀带 {@code id}，保证同名分类被反复删除（不同 id）也不会互相冲突；</li>
+     *   <li>原名已含 {@code #deleted} 时不重复追加（幂等，与清理脚本的
+     *       {@code WHERE name NOT LIKE '%#deleted%'} 判据保持一致）；</li>
+     *   <li>按"后缀优先"截断，保证总长不超过 {@code name VARCHAR(50)}，
+     *       否则改名本身会因超长而报错（把 500 从一个地方搬到另一个地方）；</li>
+     *   <li>不做 trim / 大小写处理：原名原样保留前缀，便于人工还原。</li>
+     * </ul>
+     */
+    private static String deletedName(String name, Long id) {
+        String original = name == null ? "" : name;
+        if (original.contains(DELETED_NAME_SUFFIX)) {
+            return original;
+        }
+        String suffix = DELETED_NAME_SUFFIX + id;
+        int keep = Math.max(0, CATEGORY_NAME_MAX_LENGTH - suffix.length());
+        String head = original.length() > keep ? original.substring(0, keep) : original;
+        return head + suffix;
     }
 
     /**
