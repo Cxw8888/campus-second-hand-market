@@ -4,9 +4,15 @@
  *
  * 图标按「分类 id → 组件对象」显式映射：只 import 用到的 7 个图标，
  * 既能被 tree-shaking，又不需要在 main.js 里全量注册 Element Plus 图标。
+ *
+ * 分类数据（批次 5.4）：来自 stores/category.js（接口实时数据 + 本地缓存 + CATEGORIES 兜底）。
+ *   挂载时**不 await**，用 store 当前数据先渲染一帧，后台请求回来后自动重渲染，
+ *   所以分类接口挂起 / 失败都不会让侧边栏空掉或白屏。
+ *   组件只调 store.getList()，不直接读 store.list —— 字段归一化全在 store 里完成。
  */
+import { computed, onMounted } from 'vue'
 import { Menu as IconAll, Notebook, Iphone, House, Bicycle, ShoppingBag, Box } from '@element-plus/icons-vue'
-import { CATEGORIES } from '@/utils/constants'
+import { useCategoryStore } from '@/stores/category'
 
 defineProps({
   /** 当前选中的分类 id；null 表示「全部」 */
@@ -17,6 +23,8 @@ defineProps({
 
 const emit = defineEmits(['update:modelValue'])
 
+const categoryStore = useCategoryStore()
+
 const ICON_MAP = {
   1: Notebook,
   2: Iphone,
@@ -26,11 +34,16 @@ const ICON_MAP = {
   6: Box
 }
 
-/** 拼出「全部 + 6 个分类」的完整列表 */
-const items = [
+/** 拼出「全部 + 各分类」的完整列表（分类数量随接口变化，所以是 computed） */
+const items = computed(() => [
   { id: null, name: '全部商品', icon: IconAll },
-  ...CATEGORIES.map((cat) => ({ ...cat, icon: ICON_MAP[cat.id] || Box }))
-]
+  ...categoryStore.getList().map((cat) => ({ ...cat, icon: ICON_MAP[cat.id] || Box }))
+])
+
+// 首屏不阻塞：不 await，请求在后台跑
+onMounted(() => {
+  categoryStore.ensureLoaded()
+})
 
 function select(id) {
   emit('update:modelValue', id)

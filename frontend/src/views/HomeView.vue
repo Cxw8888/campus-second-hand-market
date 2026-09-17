@@ -21,10 +21,16 @@ import ProductCard from '@/components/ProductCard.vue'
 import EmptyState from '@/components/EmptyState.vue'
 import { getProductList } from '@/api/product'
 import { mockProductPage } from '@/api/mock'
+import { useCategoryStore } from '@/stores/category'
 import { DEFAULT_PAGE_SIZE, SORT_OPTIONS, parseSort } from '@/utils/constants'
 
 const route = useRoute()
 const router = useRouter()
+
+// 分类数据源与左侧边栏共用（批次 5.4）：hero 上的「商品分类」数量不再写死 6，
+// 否则管理员新增分类后会出现「侧边栏 7 个、统计说 6 个」的自相矛盾。
+const categoryStore = useCategoryStore()
+const categoryCount = computed(() => categoryStore.getList().length)
 
 // ------------------------------------------------------------------ 查询条件
 const filters = reactive({
@@ -168,6 +174,8 @@ watch(
 onMounted(() => {
   filters.keyword = String(route.query.keyword || '')
   fetchList()
+  // 分类首屏不阻塞：不 await，请求在后台跑（与 CategorySidebar 的调用靠 store 去重，只会发一次）
+  categoryStore.ensureLoaded()
 })
 </script>
 
@@ -188,7 +196,7 @@ onMounted(() => {
             <span class="home__stat-label">在售商品</span>
           </div>
           <div class="home__stat">
-            <span class="home__stat-num cm-num">6</span>
+            <span class="home__stat-num cm-num">{{ categoryCount }}</span>
             <span class="home__stat-label">商品分类</span>
           </div>
         </div>

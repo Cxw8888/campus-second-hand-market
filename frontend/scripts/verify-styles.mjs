@@ -89,6 +89,13 @@ const REQUIRED = [
     // 5.3 新增：分类排序权重输入（整数、可步进）
     keyword: '.el-input-number',
     guard: 'el-input-number 数字输入框（批次 5.3 首次引入：分类排序权重）'
+  },
+  {
+    // 5.4 新增断言：发布/编辑表单新增「分类已失效」提示条（ProductForm 第一次用 el-alert）。
+    // 项目此前已有 el-alert（HomeView / 订单页等），但那些是别的批次的产物；
+    // 这里补一条断言，保证本批新引入的提示条样式确实进了产物，而不是白底黑字。
+    keyword: '.el-alert{',
+    guard: 'el-alert 提示条（批次 5.4：ProductForm 分类失效提示）'
   }
 ]
 

@@ -63,6 +63,7 @@ export const PAY_TIMEOUT_MINUTES = 15
  *   1-教材书籍  2-数码电子  3-生活用品  4-运动户外  5-服饰鞋包  6-其他闲置
  * 之所以硬编码而不调 GET /category/list：接口每次要联网，首屏会闪一下；
  * 而且 seed 分类是稳定的。若后端新增分类，只需在 constants.js 里补一行。
+ * 5.4 起作为接口失败/首屏兜底，不再作为唯一数据源。
  */
 export const CATEGORIES = [
   { id: 1, name: '教材书籍' },

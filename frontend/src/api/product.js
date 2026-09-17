@@ -41,19 +41,28 @@ export function getProductDetail(id, { silent = false } = {}) {
 }
 
 /**
+ * 分类列表请求超时（毫秒）
+ *
+ * 全局 axios 实例是 10 秒（utils/request.js），但分类是**纯兜底增强**的网络调用：
+ * 拿不到就用 CATEGORIES 渲染（见 stores/category.js），所以没必要让弱网把它拖到 10 秒。
+ * 6 秒内没回来就放弃本次，静默保持兜底，下次组件挂载再试。
+ */
+export const CATEGORY_LIST_TIMEOUT = 6000
+
+/**
  * 分类列表（**可选认证**，游客也能看；按 sort 升序、id 升序）
  *
  * 对应后端 GET /api/v1/category/list（CategoryController.java:32-35）→ `List<CategoryVO>`，**不分页**。
  *
- * 说明：C 端首屏用的是 constants.js 里硬编码的 `CATEGORIES`（避免首屏联网闪一下，见那里的注释）；
- * 管理端分类管理必须用**实时**数据（增删改后要立刻看到），所以走这个函数。
+ * 说明：C 端由 stores/category.js 消费本函数（首屏用 constants.js 的 `CATEGORIES` 兜底，
+ * 后台异步更新）；管理端分类管理必须用**实时**数据（增删改后要立刻看到），也走这个函数。
  *
- * @param {{ silent?: boolean }} [options]
+ * @param {{ silent?: boolean, timeout?: number }} [options] silent 默认 false；timeout 默认 6 秒
  * @returns {Promise<Array<{id: string, name: string, sort: number}>>}
  *   ⚠️ id 是 Long → 序列化成**字符串**，一律当字符串用
  */
-export function getCategoryList({ silent = false } = {}) {
-  return request.get('/category/list', { silent })
+export function getCategoryList({ silent = false, timeout = CATEGORY_LIST_TIMEOUT } = {}) {
+  return request.get('/category/list', { silent, timeout })
 }
 
 /**

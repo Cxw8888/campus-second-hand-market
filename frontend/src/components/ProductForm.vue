@@ -15,11 +15,17 @@
  *   tradeType=1 仅面交 → 面交地点必填
  *   tradeType=2 仅邮寄 → 面交地点隐藏（值也不提交，避免脏数据）
  *   tradeType=3 皆可   → 面交地点可选
+ *
+ * 分类数据（批次 5.4）：来自 stores/category.js（接口实时数据 + 本地缓存 + CATEGORIES 兜底）。
+ *   挂载时**不 await**，下拉先用 store 当前数据渲染，后台请求回来后自动重渲染。
+ *   管理员删掉某个分类时，**绝不自动清空 form.categoryId**（那会把用户已填的表单内容一起弄丢）：
+ *   改为在表单里提示「分类已失效」，并在提交前拦截（见 validate()）。
  */
-import { computed, reactive, ref } from 'vue'
+import { computed, onMounted, reactive, ref } from 'vue'
+import { ElMessage } from 'element-plus'
 import ImageUploader from '@/components/ImageUploader.vue'
+import { useCategoryStore } from '@/stores/category'
 import {
-  CATEGORIES,
   CONDITION_OPTIONS,
   MAX_PRODUCT_IMAGES,
   PRODUCT_DESCRIPTION_MAX,
@@ -36,6 +42,11 @@ const props = defineProps({
 })
 
 const formRef = ref()
+
+const categoryStore = useCategoryStore()
+
+/** 分类下拉数据（只认 store.getList()，字段差异/兜底逻辑全在 store 里） */
+const categories = computed(() => categoryStore.getList())
 
 const form = reactive({
   title: '',
@@ -62,6 +73,17 @@ const tradeLocationOptional = computed(() => form.tradeType === 3)
 
 /** 小计预估：纯展示，帮用户确认价格没填错 */
 const pricePreview = computed(() => (form.price ? formatPrice(form.price) : '—'))
+
+/**
+ * 选中的分类是否已不在当前列表里（管理员删了 / 换了分类）
+ *
+ * 比较时统一 String()：分类 id 全程是字符串，但历史数据（商品详情回填、
+ * 组件外部直接赋值）有可能是数字，用字符串比较可以避免「1 !== '1' 被误判为失效」。
+ */
+const categoryInvalid = computed(() => {
+  if (form.categoryId == null || form.categoryId === '') return false
+  return !categories.value.some((c) => String(c.id) === String(form.categoryId))
+})
 
 const rules = computed(() => ({
   title: [
@@ -117,10 +139,23 @@ const rules = computed(() => ({
   ]
 }))
 
-/** 触发校验；父组件据此决定是否真正提交 */
+/**
+ * 触发校验；父组件据此决定是否真正提交
+ *
+ * 除 Element Plus 的字段校验外，这里追加一道**分类存在性**校验：
+ * 分类可能在用户填写期间被管理员删除/迁移，此时后端会返回 code=100，
+ * 与其让用户提交后看一个看不懂的报错，不如在前端先拦住并说清原因。
+ */
 async function validate() {
   if (!formRef.value) return false
-  return formRef.value.validate().catch(() => false)
+  const passed = await formRef.value.validate().catch(() => false)
+  if (!passed) return false
+
+  if (categoryInvalid.value) {
+    ElMessage.error('您选择的分类已失效，请重新选择')
+    return false
+  }
+  return true
 }
 
 /**
@@ -146,7 +181,9 @@ function setValues(product) {
   if (!product) return
   form.title = product.title || ''
   form.description = product.description || ''
-  form.categoryId = product.categoryId != null ? Number(product.categoryId) : null
+  // 分类 id 全程字符串（后端 Long→String），与下拉选项的取值保持同一类型，
+  // 否则 el-select 会因为 1 !== '1' 而显示成「未选中」（编辑页回填失效）
+  form.categoryId = product.categoryId != null ? String(product.categoryId) : null
   form.price = product.price != null ? Number(product.price) : null
   form.stock = product.stock != null ? Number(product.stock) : 1
   form.conditionLevel = product.conditionLevel != null ? Number(product.conditionLevel) : null
@@ -175,6 +212,11 @@ function reset() {
 
 // 组件内直接回填一次（编辑页传了 initial 的情况）
 if (props.initial) setValues(props.initial)
+
+// 首屏不阻塞：不 await，分类请求在后台跑，下拉先用 store 当前数据（兜底/缓存）渲染
+onMounted(() => {
+  categoryStore.ensureLoaded()
+})
 
 defineExpose({ form, validate, getPayload, setValues, reset, formRef })
 </script>
@@ -217,7 +259,7 @@ defineExpose({ form, validate, getPayload, setValues, reset, formRef })
       <div class="product-form__row">
         <el-form-item label="商品分类" prop="categoryId">
           <el-select v-model="form.categoryId" placeholder="请选择分类" class="product-form__select">
-            <el-option v-for="c in CATEGORIES" :key="c.id" :label="c.name" :value="c.id" />
+            <el-option v-for="c in categories" :key="c.id" :label="c.name" :value="c.id" />
           </el-select>
         </el-form-item>
 
@@ -247,6 +289,17 @@ defineExpose({ form, validate, getPayload, setValues, reset, formRef })
           />
         </el-form-item>
       </div>
+
+      <!-- 分类失效提示：管理员删掉该分类后才出现。刻意**不清空** form.categoryId，
+           否则用户已经填好的其它字段体验会被打断（见 validate() 里的提交拦截） -->
+      <el-alert
+        v-if="categoryInvalid"
+        class="product-form__category-alert"
+        type="warning"
+        show-icon
+        :closable="false"
+        title="您选择的分类已失效，请重新选择"
+      />
     </section>
 
     <!-- ---------------- 成色 ---------------- -->
@@ -339,6 +392,11 @@ defineExpose({ form, validate, getPayload, setValues, reset, formRef })
     font-size: 12px;
     color: $cm-text-placeholder;
     line-height: 1.6;
+  }
+
+  // 分类失效提示：贴在「基本信息」区块底部，与上方表单保持同一呼吸感
+  &__category-alert {
+    margin: 4px 0 12px;
   }
 
   &__radios,

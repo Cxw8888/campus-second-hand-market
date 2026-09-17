@@ -18,6 +18,7 @@ import ElementPlus from 'element-plus'
 
 // ---------------- 接口打桩 ----------------
 const createProductMock = vi.fn()
+const getCategoryListMock = vi.fn()
 
 vi.mock('@/api/product', () => ({
   createProduct: (...args) => createProductMock(...args),
@@ -26,7 +27,11 @@ vi.mock('@/api/product', () => ({
   updateProduct: vi.fn(),
   offShelfProduct: vi.fn(),
   deleteProduct: vi.fn(),
-  getProductList: vi.fn()
+  getProductList: vi.fn(),
+  // 批次 5.4：ProductForm 的分类下拉改从 stores/category 取数，store 内部调这个接口。
+  // 不在这里补上的话，store 会拿到 undefined 并静默保持 CATEGORIES 兜底 —— 能跑，
+  // 但测试就不再反映真实装配，所以显式补一个真实的返回。
+  getCategoryList: (...args) => getCategoryListMock(...args)
 }))
 
 // ProductForm → ImageUploader → api/upload，一并打桩，避免真实请求
@@ -86,11 +91,19 @@ describe('ProductPublishView 发布商品防连点', () => {
   beforeEach(() => {
     globalThis.ResizeObserver = ResizeObserverStub
     document.body.innerHTML = ''
+    // 分类缓存跨用例串扰会把 store 的请求短路掉（见 stores/category.js）
+    window.localStorage.clear()
     vi.clearAllMocks()
+    // 与后端真实返回一致：id 是字符串
+    getCategoryListMock.mockResolvedValue([
+      { id: '1', name: '教材书籍', sort: 10 },
+      { id: '2', name: '数码电子', sort: 20 }
+    ])
   })
 
   afterEach(() => {
     document.body.innerHTML = ''
+    window.localStorage.clear()
   })
 
   it('快速连点 5 次「发布商品」，只发出 1 次请求', async () => {
