@@ -1,5 +1,5 @@
 /**
- * 回归测试：管理端路由守卫（第五批 5.1）
+ * 回归测试：管理端路由守卫（第五批 5.1，5.5.3 补落地页用例）
  *
  * 守的是「三件事必须分得清」，任何一条错都会造成真实事故：
  *   ① 没登录       → 跳登录页（带 redirect，回来还能接着进）
@@ -12,6 +12,10 @@
  *      而且 UserVO 的主键叫 id（不是 userId），映射写错会让订单页的买卖判定全错，所以这里一并锁住。
  *   ⑤ 兜底请求也失败（网络异常）→ 按"不是管理员"处理（管理端权限失败要 fail closed），
  *      但绝不能停在管理端页面上。
+ *
+ * 5.5.3 追加：/admin 的落地页从「商品审核」改为「数据统计」（决策 2），
+ * 用例 ⑩ 同时锁住"改落点"与"权限没被放开"两件事 —— 换 redirect 时最容易顺手把
+ * 父级 meta 也搬走，那是真正的权限漏洞。
  */
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 import { createPinia, setActivePinia } from 'pinia'
@@ -204,5 +208,56 @@ describe('管理端路由守卫', () => {
     await router.push({ name: 'home' })
     await router.push('/admin/dashboard')
     expect(router.currentRoute.value.name).toBe('admin-dashboard')
+  })
+
+  it('⑩ 5.5.3：/admin 落地页 = 数据统计（redirect → admin-dashboard），且仍受管理端权限保护', async () => {
+    // ---------------- ① 路由表层：redirect 指向 admin-dashboard ----------------
+    //
+    // ⚠️ 实测（vue-router 4.5）：`router.resolve('/admin').redirect` 是 **undefined** ——
+    //    resolve() 只做路径匹配、不跟随 redirect，路由位置对象上也没有 redirect 字段。
+    //    redirect 挂在**路由记录**上，两条可用途径：
+    //      · router.resolve('/admin').matched 里那条带 redirect 的记录
+    //      · router.getRoutes() 里 path === '/admin' 的记录
+    const resolved = router.resolve('/admin')
+    const redirectRecord = resolved.matched.find((record) => record.redirect)
+    expect(redirectRecord).toBeTruthy()
+    expect(redirectRecord.redirect).toEqual({ name: 'admin-dashboard' })
+
+    const adminRecord = router.getRoutes().find((record) => record.path === '/admin')
+    expect(adminRecord.redirect).toEqual({ name: 'admin-dashboard' })
+    expect(adminRecord.redirect.name).not.toBe('admin-product-audit')
+
+    // 落地页换了，权限 meta 一个都不能少（继承自父级 /admin）
+    expect(resolved.meta.requiresAuth).toBe(true)
+    expect(resolved.meta.requiresAdmin).toBe(true)
+    expect(resolved.meta.admin).toBe(true)
+
+    // ---------------- ② 真实导航：管理员访问 /admin → 落在 dashboard ----------------
+    setToken('admin-token')
+    const userStore = useUserStore()
+    userStore.userInfo = { userId: '1', nickname: '管理员', role: 1 }
+
+    await router.push({ name: 'home' })
+    await router.push('/admin')
+    expect(router.currentRoute.value.name).toBe('admin-dashboard')
+    expect(router.currentRoute.value.path).toBe('/admin/dashboard')
+
+    // ---------------- ③ 换落地页不等于放开权限：普通用户仍被拦到 /403 ----------------
+    userStore.userInfo = { userId: '17', nickname: '买家同学', role: 0 }
+    await router.push({ name: 'home' })
+    await router.push('/admin')
+    expect(router.currentRoute.value.name).toBe('forbidden')
+    expect(router.currentRoute.value.query.from).toBe('admin')
+
+    // ---------------- ④ 未登录仍跳登录页（回归：换 redirect 不该绕过登录拦截）----------------
+    localStorage.clear()
+    setActivePinia(createPinia())
+    await router.push({ name: 'home' })
+    await router.push('/admin')
+    expect(router.currentRoute.value.name).toBe('login')
+    // ⚠️ 这里必须是 **/admin/dashboard** 而不是 /admin：vue-router 在**守卫之前**就把
+    //    redirect 展开了，守卫看到的 to 已经是最终落点，所以 ?redirect= 带的是具体页面
+    //    （登录后直接回到数据统计，不会再多跳一次 /admin —— 这是更好的行为，实测确认）
+    expect(router.currentRoute.value.query.redirect).toBe('/admin/dashboard')
   })
 })

@@ -90,8 +90,10 @@ async function handleCommand(command) {
     return
   }
   // 管理后台入口（仅管理员可见；普通用户即使手动敲 /admin 也会被路由守卫拦到 403）
+  // 落点与 /admin 的 redirect 保持一致 = 数据统计（批次 5.5.3 决策 2；
+  // 若只改路由的 redirect 而漏了这里，同一个"进后台"动作会出现两个不同落点）
   if (command === 'admin') {
-    router.push({ name: 'admin-product-audit' })
+    router.push({ name: 'admin-dashboard' })
   }
 }
 </script>

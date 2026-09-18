@@ -68,6 +68,38 @@ export default defineConfig({
     }
   },
 
+  build: {
+    rollupOptions: {
+      output: {
+        /**
+         * 分包：把 ECharts 单独拆成一个 chunk（批次 5.5.3）
+         *
+         * 背景：5.5.2 实测 AdminDashboardView 分包已经 583 kB（ECharts 占绝大部分），
+         * 带来两个问题：① Vite 每次构建都提示 ">500 kB chunk"；② 只要改动仪表盘视图的
+         * 任何一行代码，这份 583 kB 的产物哈希就会变，浏览器缓存整块失效 —— 而 ECharts
+         * 本身几周都不会动一次，它不该跟着业务代码一起变。
+         *
+         * ⚠️ 必须用**对象形式**（chunk 名 → 模块 id 列表）而不是函数形式 `(id) => {...}`：
+         *    · 对象形式的 chunk 名是写死的（产出稳定的 `echarts-*.js`），
+         *      verify:chunks 门禁可以直接按文件名断言；
+         *    · 函数形式要自己写路径匹配，chunk 名与拆分边界随构建图漂移，
+         *      而且很容易把 echarts 与业务模块塞进同一个 chunk（等于没拆）。
+         *
+         * 列表里只要写 ECharts 的四个入口即可：zrender / tslib 是它们的内部依赖，
+         * 且全项目没有第二处引用，Rollup 会自动把它们一并归入本 chunk。
+         *
+         * 维护约定：以后再 import 别的 echarts 顶层入口（例如 'echarts/features'
+         * 的 LabelLayout / UniversalTransition），**要同步加到这个数组里**，
+         * 否则那部分代码会漏回业务 chunk。新增图表类型（LineChart 等）不用改这里 ——
+         * 它们都在 'echarts/charts' 里。
+         */
+        manualChunks: {
+          echarts: ['echarts/core', 'echarts/charts', 'echarts/components', 'echarts/renderers']
+        }
+      }
+    }
+  },
+
   server: {
     port: 5173,
     // 端口被占用时直接报错，而不是悄悄换到 5174（避免论文里写的地址对不上）
