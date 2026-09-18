@@ -154,4 +154,26 @@ public final class RedisKeys {
     public static String adminStatsProductCategory() {
         return ADMIN_STATS_PREFIX + "product-category";
     }
+
+    /**
+     * admin:stats:trend:{days}（批次 5.5.2）
+     *
+     * <p><b>必须带 days 维度</b>：7 天与 30 天返回的数组长度、日期区间都不同，
+     * 共用一个 Key 会直接把 30 天的数据当成 7 天渲染（缓存 Key 少带维度是 5.4.4
+     * 已经踩过一次的坑：换了排序却返回上一次的顺序）。</p>
+     */
+    public static String adminStatsTrend(int days) {
+        return ADMIN_STATS_PREFIX + "trend:" + days;
+    }
+
+    /**
+     * admin:stats:hot-products:{days}:{limit}（批次 5.5.2）
+     *
+     * <p>days 与 limit 都是会影响结果的维度（不同 limit 是"前 10"与"前 20"，
+     * 不是同一份数据），所以两个都要进 Key —— 拼接方式与 {@link #orderToken(Long, String)}
+     * 一致（前缀 + 冒号分隔的参数）。</p>
+     */
+    public static String adminStatsHotProducts(int days, int limit) {
+        return ADMIN_STATS_PREFIX + "hot-products:" + days + ":" + limit;
+    }
 }

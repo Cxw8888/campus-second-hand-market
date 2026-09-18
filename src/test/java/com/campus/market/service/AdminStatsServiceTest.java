@@ -1,10 +1,16 @@
 package com.campus.market.service;
 
+import com.campus.market.common.enums.ErrorCode;
+import com.campus.market.common.exception.BusinessException;
+import com.campus.market.dto.admin.DailyCount;
 import com.campus.market.mapper.AdminStatsMapper;
 import com.campus.market.service.impl.AdminStatsServiceImpl;
+import com.campus.market.vo.AdminHotProductVO;
 import com.campus.market.vo.AdminOrderStatusVO;
 import com.campus.market.vo.AdminOverviewVO;
 import com.campus.market.vo.AdminProductCategoryVO;
+import com.campus.market.vo.AdminTrendVO;
+import com.campus.market.vo.HotProductItem;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.apache.ibatis.annotations.Select;
 import org.junit.jupiter.api.BeforeEach;
@@ -24,6 +30,7 @@ import java.math.BigDecimal;
 import java.time.Clock;
 import java.time.Duration;
 import java.time.Instant;
+import java.time.LocalDate;
 import java.time.LocalDateTime;
 import java.time.ZoneId;
 import java.util.ArrayList;
@@ -32,7 +39,9 @@ import java.util.List;
 import java.util.Map;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.lenient;
@@ -40,6 +49,7 @@ import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
 
 /**
@@ -434,11 +444,278 @@ class AdminStatsServiceTest {
         verify(adminStatsMapper, times(1)).countUsersCreatedSince(any());
     }
 
+    // ================================================================ 5.5.2 趋势
+
+    @Test
+    @DisplayName("⑰ 趋势：三组数据都返回，日期升序含今天，缺数据的日期补 0（三个数组与 dates 等长）")
+    void trendShouldFillMissingDaysWithZeros() {
+        when(adminStatsMapper.countOrdersByDay(any(), any())).thenReturn(List.of(
+                new DailyCount(LocalDate.of(2026, 9, 30), 4L),
+                new DailyCount(LocalDate.of(2026, 10, 2), 7L)));
+        when(adminStatsMapper.countProductsByDay(any(), any())).thenReturn(List.of(
+                new DailyCount(LocalDate.of(2026, 10, 1), 3L)));
+        when(adminStatsMapper.countUsersByDay(any(), any())).thenReturn(List.of());
+
+        AdminTrendVO vo = adminStatsService.trend(7);
+
+        assertThat(vo.getDays()).isEqualTo(7);
+        assertThat(vo.getDates()).containsExactly(
+                "2026-09-26", "2026-09-27", "2026-09-28", "2026-09-29",
+                "2026-09-30", "2026-10-01", "2026-10-02");
+        assertThat(vo.getOrderCounts()).containsExactly(0L, 0L, 0L, 0L, 4L, 0L, 7L);
+        assertThat(vo.getProductCounts()).containsExactly(0L, 0L, 0L, 0L, 0L, 3L, 0L);
+        assertThat(vo.getUserCounts()).containsExactly(0L, 0L, 0L, 0L, 0L, 0L, 0L);
+        // 三个数组与日期轴严格等长：前端直接把它们当序列用（折线不会错位）
+        assertThat(vo.getOrderCounts()).hasSameSizeAs(vo.getDates());
+        assertThat(vo.getProductCounts()).hasSameSizeAs(vo.getDates());
+        assertThat(vo.getUserCounts()).hasSameSizeAs(vo.getDates());
+    }
+
+    @Test
+    @DisplayName("⑱ 趋势 days=30：返回 30 天（首日 = 今天-29 天），不是 7 天")
+    void trendShouldReturnThirtyDaysWhenDaysIs30() {
+        when(adminStatsMapper.countOrdersByDay(any(), any())).thenReturn(List.of());
+
+        AdminTrendVO vo = adminStatsService.trend(30);
+
+        assertThat(vo.getDays()).isEqualTo(30);
+        assertThat(vo.getDates()).hasSize(30);
+        assertThat(vo.getDates().get(0)).isEqualTo("2026-09-03");
+        assertThat(vo.getDates().get(29)).isEqualTo("2026-10-02");
+        assertThat(vo.getOrderCounts()).hasSize(30).containsOnly(0L);
+    }
+
+    @Test
+    @DisplayName("⑲ 趋势窗口：左闭右开 —— start = 今天-(days-1) 00:00，end = 明天 00:00（不用 23:59:59）")
+    void trendWindowShouldBeLeftClosedRightOpen() {
+        when(adminStatsMapper.countOrdersByDay(any(), any())).thenReturn(List.of());
+
+        adminStatsService.trend(7);
+
+        ArgumentCaptor<LocalDateTime> start = ArgumentCaptor.forClass(LocalDateTime.class);
+        ArgumentCaptor<LocalDateTime> end = ArgumentCaptor.forClass(LocalDateTime.class);
+        verify(adminStatsMapper).countOrdersByDay(start.capture(), end.capture());
+        assertThat(start.getValue()).isEqualTo(LocalDateTime.of(2026, 9, 26, 0, 0));
+        // 右边界是"明天 00:00"而不是"今天 23:59:59"：毫秒级数据不会被漏掉
+        assertThat(end.getValue()).isEqualTo(LocalDateTime.of(2026, 10, 3, 0, 0));
+
+        // 三条 SQL 必须拿到**同一个**窗口（不同表不同窗口 = 三条线对不齐）
+        ArgumentCaptor<LocalDateTime> start30 = ArgumentCaptor.forClass(LocalDateTime.class);
+        ArgumentCaptor<LocalDateTime> end30 = ArgumentCaptor.forClass(LocalDateTime.class);
+        verify(adminStatsMapper).countProductsByDay(start30.capture(), end30.capture());
+        verify(adminStatsMapper).countUsersByDay(start30.capture(), end30.capture());
+        assertThat(start30.getAllValues()).containsOnly(LocalDateTime.of(2026, 9, 26, 0, 0));
+        assertThat(end30.getAllValues()).containsOnly(LocalDateTime.of(2026, 10, 3, 0, 0));
+    }
+
+    @Test
+    @DisplayName("⑳ 边界：空库时趋势仍返回 7 个日期 + 21 个 0（不是空数组、不是 null）")
+    void trendEmptyDatabaseShouldReturnZeros() {
+        when(adminStatsMapper.countOrdersByDay(any(), any())).thenReturn(null);
+        when(adminStatsMapper.countProductsByDay(any(), any())).thenReturn(List.of());
+        when(adminStatsMapper.countUsersByDay(any(), any())).thenReturn(List.of());
+
+        AdminTrendVO vo = adminStatsService.trend(7);
+
+        assertThat(vo.getDates()).hasSize(7);
+        assertThat(vo.getOrderCounts()).hasSize(7).containsOnly(0L);
+        assertThat(vo.getProductCounts()).hasSize(7).containsOnly(0L);
+        assertThat(vo.getUserCounts()).hasSize(7).containsOnly(0L);
+    }
+
+    @Test
+    @DisplayName("㉑ 白名单：days 只允许 7 / 30，其它值抛 code=100 且不查库（含 null 走默认 7）")
+    void trendDaysOutsideWhitelistShouldBeRejected() {
+        for (int illegal : new int[]{8, 15, 29, 31, 0, -7}) {
+            assertThatThrownBy(() -> adminStatsService.trend(illegal))
+                    .as("days=%s 必须被白名单拦下", illegal)
+                    .isInstanceOf(BusinessException.class)
+                    .hasFieldOrPropertyWithValue("code", ErrorCode.PARAM_ERROR.getCode());
+        }
+        // 越界请求不应该打库（先校验后查询）
+        verifyNoInteractions(adminStatsMapper);
+
+        // null（前端省略参数）走默认 7 天，属于合法调用
+        when(adminStatsMapper.countOrdersByDay(any(), any())).thenReturn(List.of());
+        assertThat(adminStatsService.trend(null).getDays()).isEqualTo(7);
+    }
+
+    @Test
+    @DisplayName("㉒ 缓存 Key 隔离：trend:7 与 trend:30 必须是两个 Key（禁止共用）")
+    void trendCacheKeysShouldBeSeparatedByDays() {
+        when(adminStatsMapper.countOrdersByDay(any(), any())).thenReturn(List.of());
+
+        adminStatsService.trend(7);
+        adminStatsService.trend(30);
+        adminStatsService.trend(7); // 第 3 次命中 7 天的缓存
+
+        assertThat(redisStore.keySet()).containsExactlyInAnyOrder("admin:stats:trend:7", "admin:stats:trend:30");
+        // 两次真实查库（7 天 + 30 天），第 3 次是缓存命中；三条 SQL 各查两次
+        verify(adminStatsMapper, times(2)).countOrdersByDay(any(), any());
+        verify(adminStatsMapper, times(2)).countProductsByDay(any(), any());
+        verify(adminStatsMapper, times(2)).countUsersByDay(any(), any());
+    }
+
+    @Test
+    @DisplayName("㉓ 趋势缓存：第二次相同 days 不再查库，TTL 落在 60~70 秒（抖动）")
+    void trendSecondCallShouldHitCache() {
+        when(adminStatsMapper.countOrdersByDay(any(), any())).thenReturn(List.of());
+
+        AdminTrendVO first = adminStatsService.trend(7);
+        AdminTrendVO second = adminStatsService.trend(7);
+
+        assertThat(second.getDates()).isEqualTo(first.getDates());
+        verify(adminStatsMapper, times(1)).countOrdersByDay(any(), any());
+        verify(adminStatsMapper, times(1)).countProductsByDay(any(), any());
+        verify(adminStatsMapper, times(1)).countUsersByDay(any(), any());
+        assertThat(writtenTtls).hasSize(1);
+        assertThat(writtenTtls.get(0).getSeconds()).isBetween(60L, 70L);
+    }
+
+    @Test
+    @DisplayName("㉔ 趋势 SQL 口径：DATE() 只用于分组、不做时区换算；显式逻辑删除过滤 + 右开区间")
+    void trendSqlShouldGroupByDateWithoutTimezoneConversion() {
+        for (String method : new String[]{"countOrdersByDay", "countProductsByDay", "countUsersByDay"}) {
+            String sql = mapperSql(method);
+            assertThat(sql).as("%s 必须按天分组", method).contains("GROUP BY DATE(create_time)");
+            assertThat(sql).contains("is_deleted = 0");
+            // 时区口径统一由 Java 层算好（GMT+8），SQL 里不做 CONVERT_TZ / DATE_FORMAT 之类的换算
+            assertThat(sql).doesNotContain("CONVERT_TZ");
+            // 左闭右开：>= start 且 < end
+            assertThat(sql).contains("create_time >= #{start}").contains("create_time < #{end}");
+        }
+    }
+
+    // ================================================================ 5.5.2 热门榜
+
+    @Test
+    @DisplayName("㉕ 热门榜：按订单数降序（SQL 给乱序也要排对），同分按 productId 升序；limit 下推给 SQL")
+    void hotProductsShouldSortByOrderCountDesc() {
+        // 故意乱序返回：排序保证不能依赖"派生表行序会被外层继承"这种 MySQL 行为
+        when(adminStatsMapper.selectHotProducts(any(), any(), anyInt())).thenReturn(List.of(
+                new HotProductItem(5L, "四级真题", "教材书籍", 2L),
+                new HotProductItem(9L, "机械键盘", "数码电子", 5L),
+                new HotProductItem(2L, "台灯", "生活用品", 5L)));
+
+        AdminHotProductVO vo = adminStatsService.hotProducts(7, 10);
+
+        assertThat(vo.getDays()).isEqualTo(7);
+        assertThat(vo.getItems()).extracting(HotProductItem::getProductId).containsExactly(2L, 9L, 5L);
+        assertThat(vo.getItems()).extracting(HotProductItem::getOrderCount).containsExactly(5L, 5L, 2L);
+
+        ArgumentCaptor<Integer> limit = ArgumentCaptor.forClass(Integer.class);
+        verify(adminStatsMapper).selectHotProducts(any(), any(), limit.capture());
+        assertThat(limit.getValue()).isEqualTo(10);
+    }
+
+    @Test
+    @DisplayName("㉖ 热门榜：商品被逻辑删除时仍上榜，标题用订单快照、分类名为 null（前端显示「—」）")
+    void hotProductsShouldKeepOrderSnapshotTitleWhenProductDeleted() {
+        when(adminStatsMapper.selectHotProducts(any(), any(), anyInt())).thenReturn(List.of(
+                // 商品已删除：LEFT JOIN tb_product 拿不到分类 → categoryName 为 null，
+                // 但标题来自 tb_order.product_title（快照），必须原样保留
+                new HotProductItem(14L, "二手高等数学教材（第三版）", null, 5L)));
+
+        AdminHotProductVO vo = adminStatsService.hotProducts(7, 10);
+
+        assertThat(vo.getItems()).hasSize(1);
+        assertThat(vo.getItems().get(0).getProductTitle()).isEqualTo("二手高等数学教材（第三版）");
+        assertThat(vo.getItems().get(0).getCategoryName()).isNull();
+        assertThat(vo.getItems().get(0).getOrderCount()).isEqualTo(5L);
+    }
+
+    @Test
+    @DisplayName("㉗ 边界：近 7 天无订单 → items 是空数组而不是 null（days 照常回显）")
+    void hotProductsEmptyShouldReturnEmptyList() {
+        when(adminStatsMapper.selectHotProducts(any(), any(), anyInt())).thenReturn(List.of());
+        assertThat(adminStatsService.hotProducts(7, 10).getItems()).isEmpty();
+
+        redisStore.clear();
+        when(adminStatsMapper.selectHotProducts(any(), any(), anyInt())).thenReturn(null);
+        assertThat(adminStatsService.hotProducts(7, 10).getItems()).isEmpty();
+    }
+
+    @Test
+    @DisplayName("㉘ 白名单：limit 只允许 1~20、days 只允许 7/30，越界抛 code=100 且不查库")
+    void hotProductsWhitelistShouldBeEnforced() {
+        for (Integer illegal : new Integer[]{0, 21, 100, -1}) {
+            assertThatThrownBy(() -> adminStatsService.hotProducts(7, illegal))
+                    .as("limit=%s 必须被拦下", illegal)
+                    .isInstanceOf(BusinessException.class)
+                    .hasFieldOrPropertyWithValue("code", ErrorCode.PARAM_ERROR.getCode());
+        }
+        assertThatThrownBy(() -> adminStatsService.hotProducts(15, 10))
+                .isInstanceOf(BusinessException.class)
+                .hasFieldOrPropertyWithValue("code", ErrorCode.PARAM_ERROR.getCode());
+        verifyNoInteractions(adminStatsMapper);
+
+        // 边界值 1 与 20 合法
+        when(adminStatsMapper.selectHotProducts(any(), any(), anyInt())).thenReturn(List.of());
+        assertThat(adminStatsService.hotProducts(7, 1).getItems()).isEmpty();
+        assertThat(adminStatsService.hotProducts(7, 20).getItems()).isEmpty();
+        // null 走默认值（days=7 / limit=10）
+        assertThat(adminStatsService.hotProducts(null, null).getDays()).isEqualTo(7);
+    }
+
+    @Test
+    @DisplayName("㉙ 缓存 Key 隔离：hot-products:{days}:{limit} —— 换 days 或 limit 都不能命中同一份缓存")
+    void hotProductsCacheKeysShouldCoverBothDimensions() {
+        when(adminStatsMapper.selectHotProducts(any(), any(), anyInt())).thenReturn(List.of());
+
+        adminStatsService.hotProducts(7, 10);
+        adminStatsService.hotProducts(7, 20);
+        adminStatsService.hotProducts(30, 10);
+        adminStatsService.hotProducts(7, 10); // 命中缓存
+
+        assertThat(redisStore.keySet()).containsExactlyInAnyOrder(
+                "admin:stats:hot-products:7:10",
+                "admin:stats:hot-products:7:20",
+                "admin:stats:hot-products:30:10");
+        verify(adminStatsMapper, times(3)).selectHotProducts(any(), any(), anyInt());
+    }
+
+    @Test
+    @DisplayName("㉚ 热门榜缓存：第二次相同参数不再查库，TTL 落在 60~70 秒")
+    void hotProductsSecondCallShouldHitCache() {
+        when(adminStatsMapper.selectHotProducts(any(), any(), anyInt())).thenReturn(List.of(
+                new HotProductItem(1L, "教材", "教材书籍", 3L)));
+
+        adminStatsService.hotProducts(7, 10);
+        AdminHotProductVO second = adminStatsService.hotProducts(7, 10);
+
+        assertThat(second.getItems()).hasSize(1);
+        assertThat(second.getItems().get(0).getProductTitle()).isEqualTo("教材");
+        verify(adminStatsMapper, times(1)).selectHotProducts(any(), any(), anyInt());
+        assertThat(writtenTtls).hasSize(1);
+        assertThat(writtenTtls.get(0).getSeconds()).isBetween(60L, 70L);
+    }
+
+    @Test
+    @DisplayName("㉛ 热门榜 SQL 口径：取最新标题用 GROUP_CONCAT+SUBSTRING_INDEX（不是 MAX），LEFT JOIN 不过滤已删除商品")
+    void hotProductsSqlShouldUseLatestTitleAndLeftJoin() {
+        String sql = mapperSql("selectHotProducts");
+
+        // 同一商品可能改过名：必须取"最新一单"的标题
+        assertThat(sql).contains("GROUP_CONCAT(o.product_title ORDER BY o.create_time DESC");
+        assertThat(sql).contains("SUBSTRING_INDEX");
+        // 严禁 MAX(product_title)：那是字典序最大，不是最新
+        assertThat(sql).doesNotContain("MAX(");
+        // 商品可能已被逻辑删除，但仍要能上榜 + 拿到分类 → 必须是 LEFT JOIN 且不加 p.is_deleted
+        assertThat(sql).contains("LEFT JOIN tb_product p ON p.id = t.product_id");
+        assertThat(sql).doesNotContain("p.is_deleted");
+        // 分类名靠 LEFT JOIN tb_category（选项 A：拿不到就是 null，由前端显示「—」）
+        assertThat(sql).contains("LEFT JOIN tb_category c");
+        // 内层取前 N、外层再排一次；右开区间
+        assertThat(sql).contains("LIMIT #{limit}");
+        assertThat(sql).contains("ORDER BY t.order_count DESC");
+        assertThat(sql).contains("o.create_time >= #{start}").contains("o.create_time < #{end}");
+        assertThat(sql).contains("o.is_deleted = 0");
+    }
+
     // ================================================================ 工具
 
     /** 读取 Mapper 方法上 {@code @Select} 注解里的 SQL（用于锁定口径，而不只是锁定算法）。 */
-    private static String mapperSql(String methodName) {
-        for (Method method : AdminStatsMapper.class.getDeclaredMethods()) {
+    private static String mapperSql(String methodName) {        for (Method method : AdminStatsMapper.class.getDeclaredMethods()) {
             if (method.getName().equals(methodName)) {
                 Select select = method.getAnnotation(Select.class);
                 assertThat(select).as("%s 必须标注 @Select", methodName).isNotNull();
