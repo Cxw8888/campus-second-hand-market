@@ -289,3 +289,52 @@ X.8 测试结论
 测试发现并修复的 5 个代码级缺陷，其中 2 个是仅在运行时才暴露的隐蔽 Bug（Jackson 序列化、MySQL SET 赋值顺序），这是本章测试最重要的产出。
 
 系统在功能正确性、安全防护有效性、并发一致性三个维度均达到生产级标准，可以交付使用。
+
+===============================================================
+5.5.3 收尾批测试结果
+===============================================================
+测试时间	2026-09-19 00:54
+测试范围	ECharts 独立分包、/admin 落地页改版、路由与分包门禁补测、全量回归
+测试环境	Windows 11 / OpenJDK 21.0.12 / Node v22.23.2 / Vite 5.4.11 / ECharts 6.1.0
+
+一、后端单测
+命令	javac -parameters（146 个主源文件）+ 13 个测试类，JUnit Platform Launcher 运行（-Djdk.attach.allowAttachSelf=true）
+结果	80 / 80 通过（AdminStatsServiceTest 32 个 + 既有 10 个测试类 48 个）
+说明	本批未改动任何后端代码，重跑作为回归确认；后端用例数与 5.5.2 一致
+
+二、前端单测
+命令	npx vitest run
+结果	17 个文件 / 177 个用例全绿（5.5.2 为 176 个，本批 +1）
+新增用例	router/__tests__/adminGuard.spec.js 用例 ⑩：
+	① 路由记录层：/admin 的 redirect = { name: "admin-dashboard" }（用 router.resolve("/admin").matched 与 router.getRoutes() 两条途径断言）
+	② 真实导航层：管理员访问 /admin 落在 /admin/dashboard；role=0 仍跳 /403、未登录仍跳登录页（证明换落地页没有放开权限）
+实测补充	vue-router 4 的 router.resolve("/admin").redirect 是 undefined —— resolve 不跟随也不暴露 redirect，redirect 只挂在路由记录上
+
+三、生产构建
+命令	npm run build
+结果	无 error（构建耗时 8.3 s）
+分包	echarts-BhFyyVqz.js 569.83 kB（gzip 195.78 kB）
+	AdminDashboardView-CSdgXsyL.js 13.82 kB（gzip 5.66 kB），拆前为 583.73 kB（gzip 201.38 kB）
+	index 主包 378.97 kB（gzip 137.86 kB），拆前 378.94 kB（gzip 137.84 kB），基本不变
+体积提示	构建日志仍有一条 ">500 kB chunk" 提示，指向 echarts 独立分包（该分包只在进入仪表盘路由时懒加载，不影响首屏）
+
+四、样式门禁
+命令	npm run verify:styles
+结果	11 / 11 关键字命中，exit=0
+
+五、ECharts 分包门禁（本批新增，npm run verify:chunks）
+命令	npm run verify:chunks
+结果	10 / 10 项检查通过，exit=0
+断言内容	① echarts-*.js 独立分包存在且小于 900 kB
+	② AdminDashboardView-*.js 不含 ECharts 代码且小于 200 kB
+	③ 入口主包 index-*.js（含 Vite 生成的 index-* 共享小块）、AdminLayout、商品审核、用户管理、订单管理分包均不含 ECharts 代码
+判定标记	zrender / getInstanceByDom / [ECharts] 三个代码级标记
+	（裸串 "echarts" 会命中 chunk 文件名——引用方的 __vite__mapDeps 里写着 echarts-<hash>.js，实测会把拆好的结果误判为失败，故不使用）
+反向对照	临时把 manualChunks 置空后重新构建：仪表盘分包回到 583.73 kB，门禁以 exit=1 拦下（2 项失败），证明该门禁不是空转
+
+六、功能验收
+	✅ 路由记录 redirect = admin-dashboard；管理员访问 /admin 实测落在 /admin/dashboard；未登录时带 ?redirect=/admin/dashboard
+	✅ 换落地页未放开权限：学生 token 访问 /admin/** 仍为 HTTP 200 + code=403，未登录仍为 HTTP 401
+	✅ 数据统计页面：4 概览卡片 + 2 分布图 + 趋势折线图（7/30 天切换）+ 热门榜 Top 10（23 个组件用例 + 真实 ECharts SSR 渲染断言）
+	⚠️ 浏览器目视走查未执行（本机无浏览器自动化）：/admin 跳转与仪表盘视觉请按 5.5.1 的方式确认一次；
+	   注意后端需重启到 5.5.2 及其后代码，否则统计接口会 404
