@@ -1,5 +1,5 @@
 /**
- * ECharts 按需引入（批次 5.5.1）
+ * ECharts 按需引入（批次 5.5.1 引入，5.5.2 追加 LineChart）
  *
  * ⚠️ **严禁**写 `import * as echarts from 'echarts'`：
  *    全量包 1MB+（未压缩），会让首屏和构建产物一起变胖，而且我们只用了饼图 + 条形图两种图。
@@ -11,17 +11,18 @@
  *    一旦某处绕开本文件单独引入，就会出现"两份 echarts 实例"，图表互相拿不到
  *    （表现为 getInstanceByDom 返回 undefined、resize 失效）。
  *
- * 注册清单（与本批实际用法一一对应）：
- *   · 图表：PieChart（订单状态分布）、BarChart（商品分类分布）
+ * 注册清单（与实际用法一一对应）：
+ *   · 图表：PieChart（订单状态分布）、BarChart（商品分类分布）、LineChart（趋势图，5.5.2 追加）
  *   · 组件：TitleComponent、TooltipComponent、LegendComponent、GridComponent
- *     （GridComponent 同时带来直角坐标系的两根轴，条形图靠它；标题其实由页面的卡片承担，
- *       但保留注册，5.5.2 的趋势图直接可用）
+ *     （GridComponent 同时带来直角坐标系的两根轴，条形图与折线图都靠它）
  *   · 渲染器：CanvasRenderer（默认，无需额外依赖）
  *   · features：**未引入**。LabelLayout 只在显式使用 labelLayout 配置时才需要；
  *       饼图的 avoidLabelOverlap 由 PieChart 内部自带（echarts/lib/chart/pie/labelLayout.js）。
+ *       趋势图的时间轴用 category 轴（后端已经序列化好 yyyy-MM-dd），
+ *       因此不需要 time 轴与 DataZoomComponent（5.5.2 刻意不加，避免无谓体积）。
  */
 import * as echarts from 'echarts/core'
-import { BarChart, PieChart } from 'echarts/charts'
+import { BarChart, LineChart, PieChart } from 'echarts/charts'
 import {
   GridComponent,
   LegendComponent,
@@ -34,6 +35,7 @@ echarts.use([
   // 图表
   PieChart,
   BarChart,
+  LineChart,
   // 组件
   TitleComponent,
   TooltipComponent,

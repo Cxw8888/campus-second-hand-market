@@ -251,3 +251,70 @@ export function getAdminStatsOrderStatus({ silent = false } = {}) {
 export function getAdminStatsProductCategory({ silent = false } = {}) {
   return request.get('/admin/stats/product-category', { silent })
 }
+
+/**
+ * 统计计数的归一化：后端 `Long → String`（JacksonConfig），拿到的是 "5" 而不是 5。
+ *
+ * ⚠️ 转换**只在本层做**（需求明确：不要在组件层再转换一次）：
+ *    组件里拿到的就是干净的 number，可以放心做加法、比较、喂给 ECharts。
+ *    注意与「禁止 Number(id)」不冲突 —— 那条规则针对 id / orderNo 这类标识，
+ *    计数是安全的小整数。
+ */
+function toCount(value) {
+  const num = Number(value)
+  return Number.isFinite(num) ? num : 0
+}
+
+/** 把后端返回的字符串数组归一化成 number 数组（非数组一律给空数组，绝不返回 null） */
+function toCountArray(value) {
+  return Array.isArray(value) ? value.map(toCount) : []
+}
+
+/**
+ * 统计 · 趋势数据（批次 5.5.2）
+ *
+ * @param {number} [days=7] 统计天数，**白名单 7 / 30**（其它值后端 code=100）
+ * @param {{ silent?: boolean }} [options]
+ * @returns {Promise<{days: number, dates: string[], orderCounts: number[],
+ *   productCounts: number[], userCounts: number[]}>}
+ *   · `dates` 已是后端序列化好的 `yyyy-MM-dd` 字符串，**前端不要再格式化**，直接喂 xAxis.data
+ *   · 三个 counts 数组与 dates **严格等长**（后端缺日期补 0），可直接当序列用
+ */
+export async function getAdminStatsTrend(days = 7, { silent = false } = {}) {
+  const data = await request.get('/admin/stats/trend', { params: { days }, silent })
+  return {
+    days: toCount(data?.days ?? days),
+    dates: Array.isArray(data?.dates) ? data.dates.map(String) : [],
+    orderCounts: toCountArray(data?.orderCounts),
+    productCounts: toCountArray(data?.productCounts),
+    userCounts: toCountArray(data?.userCounts)
+  }
+}
+
+/**
+ * 统计 · 热门商品榜（批次 5.5.2）
+ *
+ * @param {number} [days=7]  窗口天数，白名单 7 / 30
+ * @param {number} [limit=10] 返回条数，白名单 1~20
+ * @param {{ silent?: boolean }} [options]
+ * @returns {Promise<{days: number, items: Array<{productId: string, productTitle: string,
+ *   categoryName: string, orderCount: number}>}>}
+ *   · `productId` 是 Long → **字符串**，全程字符串（禁止 Number()）
+ *   · `categoryName` 可能为 ''（后端 null：商品已删除 / 未分类 / 分类已删除），展示时由页面出「—」
+ *   · 无数据时 items 是**空数组**
+ */
+export async function getAdminStatsHotProducts(days = 7, limit = 10, { silent = false } = {}) {
+  const data = await request.get('/admin/stats/hot-products', { params: { days, limit }, silent })
+  return {
+    days: toCount(data?.days ?? days),
+    items: Array.isArray(data?.items)
+      ? data.items.map((item) => ({
+          // id 全程字符串：一定要在归一化时 String() 保住它
+          productId: item?.productId == null ? '' : String(item.productId),
+          productTitle: item?.productTitle == null ? '' : String(item.productTitle),
+          categoryName: item?.categoryName == null ? '' : String(item.categoryName),
+          orderCount: toCount(item?.orderCount)
+        }))
+      : []
+  }
+}

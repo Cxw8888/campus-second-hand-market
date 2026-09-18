@@ -29,7 +29,7 @@ import { describe, it, expect, vi } from 'vitest'
 // 注意：这里必须取**默认导出**（echarts/core 的命名空间对象，带 use/init），
 // `import * as echarts` 拿到的是本模块自己的命名空间，没有 use 方法。
 import echarts, { toneColor } from '@/utils/echarts'
-import { buildStatChartOption } from '@/components/admin/statChartOptions'
+import { buildStatChartOption, buildTrendLineOption } from '@/components/admin/statChartOptions'
 import { SVGRenderer } from 'echarts/renderers'
 
 // SSR 渲染必须用 SVG 渲染器（jsdom 没有 canvas，CanvasRenderer 在这里根本没法工作）
@@ -48,6 +48,23 @@ const BAR_DATA = [
   { name: '教材书籍', value: 20 },
   { name: '其他闲置', value: 0 },
   { name: '未分类（分类已删除）', value: 2, color: '#9ca3af' }
+]
+
+/** 趋势图数据（批次 5.5.2）：日期是后端序列化好的 yyyy-MM-dd 字符串 */
+const TREND_DATES = [
+  '2026-09-12',
+  '2026-09-13',
+  '2026-09-14',
+  '2026-09-15',
+  '2026-09-16',
+  '2026-09-17',
+  '2026-09-18'
+]
+
+const TREND_SERIES = [
+  { name: '订单量', data: [0, 0, 0, 0, 36, 2, 0], tone: 'orange' },
+  { name: '商品发布', data: [3, 3, 2, 3, 2, 0, 0], tone: 'green' },
+  { name: '用户注册', data: [0, 0, 0, 5, 26, 0, 0], tone: 'blue' }
 ]
 
 /**
@@ -190,5 +207,77 @@ describe('statChartOptions 图表 option', () => {
     }
 
     expect(logs.join(' ')).toMatch(/not exists|Unknown|不存在/i)
+  })
+
+  // ================================================================ 趋势折线图（5.5.2）
+
+  it('⑨ 折线图：三条线、x 轴用后端给的日期字符串（不再格式化）、grid 用 v6 的 outerBounds', () => {
+    const option = buildTrendLineOption({ dates: TREND_DATES, series: TREND_SERIES })
+
+    expect(option.series).toHaveLength(3)
+    expect(option.series.map((s) => s.type)).toEqual(['line', 'line', 'line'])
+    expect(option.series.map((s) => s.name)).toEqual(['订单量', '商品发布', '用户注册'])
+    expect(option.series[0].data).toEqual([0, 0, 0, 0, 36, 2, 0])
+    // 日期原样进 x 轴：前端绝不重新格式化（后端已序列化成 yyyy-MM-dd）
+    expect(option.xAxis.data).toEqual(TREND_DATES)
+    expect(option.xAxis.type).toBe('category')
+    expect(option.yAxis.minInterval).toBe(1)
+    // ECharts 6：containLabel 已废弃（未注册 legacy feature 时会静默失效），必须用 outerBounds*
+    expect(option.grid.outerBoundsMode).toBe('same')
+    expect(option.grid.outerBoundsContain).toBe('all')
+    expect(option.grid.containLabel).toBeUndefined()
+    // 颜色来自语义 tone
+    expect(option.color).toEqual([toneColor('orange'), toneColor('green'), toneColor('blue')])
+  })
+
+  it('⑩ 折线图：30 天时隐藏数据点标记（否则 30 个圆点会把线糊住），7 天时显示', () => {
+    const many = new Array(30).fill(1)
+    const longOption = buildTrendLineOption({
+      dates: many.map((_, i) => `2026-09-${String(i + 1).padStart(2, '0')}`),
+      series: [{ name: '订单量', data: many, tone: 'orange' }]
+    })
+    expect(longOption.series[0].showSymbol).toBe(false)
+
+    const shortOption = buildTrendLineOption({ dates: TREND_DATES, series: TREND_SERIES })
+    expect(shortOption.series[0].showSymbol).toBe(true)
+  })
+
+  it('⑪ 折线图 options 覆盖：tooltip.formatter 由页面注入（组件里不写业务中文）', () => {
+    const formatter = (params) => `自定义 ${params.length}`
+    const option = buildTrendLineOption({
+      dates: TREND_DATES,
+      series: TREND_SERIES,
+      options: { tooltip: { trigger: 'axis', formatter } }
+    })
+
+    expect(option.tooltip.formatter).toBe(formatter)
+    expect(option.legend).toBeTruthy() // 未覆盖的键保持默认
+  })
+
+  it('⑫ 折线图边界：空日期 / 空 series 不抛异常（页面用 v-if 换成占位文案）', () => {
+    const option = buildTrendLineOption({ dates: [], series: [] })
+    expect(option.xAxis.data).toEqual([])
+    expect(option.series).toEqual([])
+    expect(buildTrendLineOption()).toBeTruthy()
+  })
+
+  it('⑬ SSR 真实渲染（5.5.2）：折线图三条线都画出来，且 ECharts 零警告（含废弃 API 检查）', () => {
+    const option = buildTrendLineOption({
+      dates: TREND_DATES,
+      series: TREND_SERIES,
+      options: { tooltip: { trigger: 'axis', formatter: '{b} {c}' } }
+    })
+
+    const { svg, logs } = renderSvg(option)
+
+    expect(svg.startsWith('<svg')).toBe(true)
+    // 图例 = 三条线的名字（LegendComponent 必须已注册）
+    expect(svg).toContain('订单量')
+    expect(svg).toContain('商品发布')
+    expect(svg).toContain('用户注册')
+    // 折线路径（LineChart 必须已注册）
+    expect(svg).toContain('<path')
+    // 关键：没有 "Component xxx not exists"，也没有 "grid.containLabel is deprecated"
+    expect(logs.filter((line) => line.includes('[ECharts]'))).toEqual([])
   })
 })

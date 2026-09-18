@@ -478,6 +478,29 @@ export const ADMIN_STATS_CACHE_SECONDS = 60
 export const ADMIN_STATS_UNCATEGORIZED_LABEL = '未分类（分类已删除）'
 
 /**
+ * 趋势图可切换的天数档位（批次 5.5.2）。
+ *
+ * ⚠️ 必须与后端 `AdminStatsServiceImpl.ALLOWED_WINDOW_DAYS` 白名单**逐字对齐**：
+ *    后端只接受 7 与 30，传别的值（例如 15）直接 code=100。
+ *    加档位要两边一起改，否则页面上会出现一个点了就报错的按钮。
+ */
+export const ADMIN_STATS_TREND_RANGES = [7, 30]
+
+/**
+ * 热门榜的窗口天数（批次 5.5.2 决策 2：固定「近 7 天」，页面上不做切换）。
+ *
+ * 接口本身保留 `days` 参数以便将来扩展，但前端只传这一个值；
+ * 页面上所有"近 N 天"的文案都从这里取，避免同一个数字写在三处。
+ */
+export const ADMIN_STATS_HOT_DAYS = 7
+
+/** 热门榜条数（与后端 limit 白名单 1~20 内；固定 Top 10） */
+export const ADMIN_STATS_HOT_LIMIT = 10
+
+/** 热门榜「分类名缺失」时的占位符（后端返回 null，文案由前端出） */
+export const ADMIN_STATS_EMPTY_CELL = '—'
+
+/**
  * 分类排序权重的前端兜底范围
  *
  * ⚠️ 后端 `CategorySaveRequest.sort` **没有 @Min/@Max**（只有 `Integer sort = 0` 默认值，

@@ -124,4 +124,72 @@ export function buildStatChartOption({ type = 'pie', data = [], options = {} } =
   return { ...base, ...(options ?? {}) }
 }
 
+/**
+ * 趋势折线图 option（批次 5.5.2）：同一个 x 轴（日期）上的多条折线。
+ *
+ * @param {{ dates?: string[], series?: Array<{name: string, data: number[], tone?: string, color?: string}>,
+ *   options?: object }} params
+ *   · dates 直接用后端给的 `yyyy-MM-dd` 字符串（后端已序列化，前端**不**再格式化）
+ *   · 每条 series.data 与该数组等长（后端缺日期补 0，折线不会错位）
+ * @returns {object} ECharts option（顶层键、含 grid / tooltip 文案，均可被 options 覆盖）
+ */
+export function buildTrendLineOption({ dates = [], series = [], options = {} } = {}) {
+  const axisDates = (dates ?? []).map(String)
+  // 点多的时候隐藏数据点标记，只留线 —— 30 天的 30 个圆点会让折线糊成一团
+  const showSymbol = axisDates.length <= 10
+
+  const base = {
+    // 三条线的颜色：语义 tone → 设计系统色值（与饼图/条形图同一套色表）
+    color: (series ?? []).map((item) => item.color || toneColor(item.tone)),
+    // v6 写法：不要用 containLabel（已 deprecated，未注册 LegacyGridContainLabel 时静默失效）
+    grid: {
+      left: 8,
+      right: 16,
+      top: 36,
+      bottom: 4,
+      outerBoundsMode: 'same',
+      outerBoundsContain: 'all'
+    },
+    tooltip: { trigger: 'axis' },
+    legend: {
+      top: 0,
+      icon: 'roundRect',
+      itemWidth: 12,
+      itemHeight: 4,
+      textStyle: { fontSize: 12, color: '#6b7280' }
+    },
+    xAxis: {
+      type: 'category',
+      // boundaryGap:false：折线从轴起点开始（日期轴不该左右各留半格）
+      boundaryGap: false,
+      data: axisDates,
+      axisLine: { lineStyle: { color: '#e5e7eb' } },
+      axisTick: { show: false },
+      axisLabel: { color: '#9ca3af', fontSize: 11 }
+    },
+    yAxis: {
+      type: 'value',
+      // 计数是整数：不加 minInterval 会出现 0.5 单这种刻度
+      minInterval: 1,
+      axisLine: { show: false },
+      axisTick: { show: false },
+      axisLabel: { color: '#9ca3af', fontSize: 11 },
+      splitLine: { lineStyle: { color: '#f3f4f6' } }
+    },
+    series: (series ?? []).map((item) => ({
+      name: item.name,
+      type: 'line',
+      smooth: true,
+      symbol: 'circle',
+      symbolSize: 6,
+      showSymbol,
+      lineStyle: { width: 2 },
+      // 极淡的area：三条线叠在一起时更容易看清谁在谁上面
+      areaStyle: { opacity: 0.06 },
+      data: (item.data ?? []).map(Number)
+    }))
+  }
+  return { ...base, ...(options ?? {}) }
+}
+
 export default buildStatChartOption

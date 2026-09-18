@@ -42,11 +42,15 @@ vi.mock('@/utils/echarts', () => ({
 const getOverviewMock = vi.fn()
 const getOrderStatusMock = vi.fn()
 const getProductCategoryMock = vi.fn()
+const getTrendMock = vi.fn()
+const getHotMock = vi.fn()
 
 vi.mock('@/api/admin', () => ({
   getAdminStatsOverview: (...a) => getOverviewMock(...a),
   getAdminStatsOrderStatus: (...a) => getOrderStatusMock(...a),
   getAdminStatsProductCategory: (...a) => getProductCategoryMock(...a),
+  getAdminStatsTrend: (...a) => getTrendMock(...a),
+  getAdminStatsHotProducts: (...a) => getHotMock(...a),
   // 以下本文件用不到，保持模块形状完整
   getAdminProductList: vi.fn(),
   auditProduct: vi.fn(),
@@ -106,17 +110,45 @@ const PRODUCT_CATEGORY = [
 ]
 
 /**
+ * 趋势（5.5.2）：api 层已经做过 Number() 归一化 —— 所以这里给**数字数组**，
+ * 与真实调用链一致（真实的 "0"/"36" 字符串 → number 的转换在 api/admin.spec.js 里验）。
+ */
+const TREND = {
+  days: 7,
+  dates: ['2026-09-12', '2026-09-13', '2026-09-14', '2026-09-15', '2026-09-16', '2026-09-17', '2026-09-18'],
+  orderCounts: [0, 0, 0, 0, 36, 2, 0],
+  productCounts: [3, 3, 2, 3, 2, 0, 0],
+  userCounts: [0, 0, 0, 5, 26, 0, 0]
+}
+
+/** 完全没有趋势数据（连日期轴都没有）→ 趋势区应当不画图 */
+const EMPTY_TREND = { days: 7, dates: [], orderCounts: [], productCounts: [], userCounts: [] }
+
+/** 热门榜（5.5.2）：productId 是字符串（Long → String），orderCount 已被 api 层转成 number */
+const HOT_ITEMS = [
+  { productId: '14', productTitle: '二手高等数学教材（第三版）', categoryName: '教材书籍', orderCount: 5 },
+  { productId: '21', productTitle: '英语四级真题册（近5年真题+听力音频+答案解析合集）', categoryName: '教材书籍', orderCount: 5 },
+  { productId: '5', productTitle: '小米台灯', categoryName: '', orderCount: 4 }
+]
+
+/**
  * 挂载页面。
  *
- * @param {{overview?: object, orderStatus?: Array, category?: Array, reject?: string|null}} [options]
+ * @param {{overview?: object, orderStatus?: Array, category?: Array, trend?: object, hot?: Array,
+ *   reject?: string|null, trendReject?: string|null, hotReject?: string|null}} [options]
  *   reject：让 overview 接口失败（'forbidden' 走 code=403，其余字符串作为网络异常信息），
- *   另外两个接口照常返回数据 —— 用来验证"只要有一个 403，整页就该进无权限态"
+ *   另外两个接口照常返回数据 —— 用来验证"只要有一个 403，整页就该进无权限态"。
+ *   trendReject / hotReject：只让**某个区块**失败 —— 用来验证区块之间互不连坐。
  */
 async function mountPage({
   overview = OVERVIEW,
   orderStatus = ORDER_STATUS,
   category = PRODUCT_CATEGORY,
-  reject = null
+  trend = TREND,
+  hot = HOT_ITEMS,
+  reject = null,
+  trendReject = null,
+  hotReject = null
 } = {}) {
   const router = createRouter({
     history: createMemoryHistory(),
@@ -137,6 +169,22 @@ async function mountPage({
   }
   getOrderStatusMock.mockResolvedValue(orderStatus)
   getProductCategoryMock.mockResolvedValue(category)
+
+  // 5.5.2 的两个新区块接口：各自可单独失败，互不影响
+  if (trendReject) {
+    getTrendMock.mockRejectedValue(
+      trendReject === 'forbidden' ? { code: 403, message: '无权限访问' } : new Error(String(trendReject))
+    )
+  } else {
+    getTrendMock.mockResolvedValue(trend)
+  }
+  if (hotReject) {
+    getHotMock.mockRejectedValue(
+      hotReject === 'forbidden' ? { code: 403, message: '无权限访问' } : new Error(String(hotReject))
+    )
+  } else {
+    getHotMock.mockResolvedValue({ days: 7, items: hot })
+  }
 
   const wrapper = mount(AdminDashboardView, {
     global: { plugins: [router, ElementPlus], stubs: { transition: false } }
@@ -199,17 +247,21 @@ describe('AdminDashboardView 数据统计', () => {
   })
 
   // ================================================================ ③ 图表
-  it('③ 两张图各自实例化 ECharts：饼图（订单状态）+ 条形图（商品分类）', async () => {
+  it('③ 三张图各自实例化 ECharts：饼图（订单状态）+ 条形图（商品分类）+ 折线图（趋势）', async () => {
     const { wrapper } = await mountPage()
 
-    expect(wrapper.findAllComponents(StatChart)).toHaveLength(2)
-    expect(initMock).toHaveBeenCalledTimes(2)
+    expect(wrapper.findAllComponents(StatChart)).toHaveLength(3)
+    expect(initMock).toHaveBeenCalledTimes(3)
 
-    const pieOption = createdCharts[0].setOption.mock.calls[0][0]
-    const barOption = createdCharts[1].setOption.mock.calls[0][0]
+    // 按 option 的 series 类型定位，不依赖挂载顺序（顺序变了不该让用例变红）
+    const options = createdCharts.map((chart) => chart.setOption.mock.calls[0][0])
+    const pieOption = options.find((o) => o.series?.[0]?.type === 'pie')
+    const barOption = options.find((o) => o.series?.[0]?.type === 'bar')
+    const lineOption = options.find((o) => o.series?.[0]?.type === 'line')
 
-    expect(pieOption.series[0].type).toBe('pie')
-    expect(barOption.series[0].type).toBe('bar')
+    expect(pieOption).toBeTruthy()
+    expect(barOption).toBeTruthy()
+    expect(lineOption).toBeTruthy()
 
     // 饼图：8 种状态一个不少（含 count=0 的两种，图例必须稳定）
     expect(pieOption.series[0].data).toHaveLength(8)
@@ -246,23 +298,26 @@ describe('AdminDashboardView 数据统计', () => {
 
   it('⑥ 卸载时 dispose 每个图表实例（否则每次进路由都漏一个实例）', async () => {
     const { wrapper } = await mountPage()
-    expect(createdCharts).toHaveLength(2)
+    expect(createdCharts).toHaveLength(3)
 
     wrapper.unmount()
 
     expect(createdCharts[0].dispose).toHaveBeenCalledTimes(1)
     expect(createdCharts[1].dispose).toHaveBeenCalledTimes(1)
+    expect(createdCharts[2].dispose).toHaveBeenCalledTimes(1)
   })
 
-  it('③ 补充：没有订单/没有商品数据时不硬画空图，改用占位文案', async () => {
+  it('③ 补充：没有订单/没有商品/没有趋势数据时不硬画空图，改用占位文案', async () => {
     const { wrapper } = await mountPage({
       orderStatus: ORDER_STATUS.map((row) => ({ ...row, count: '0' })),
-      category: [{ categoryId: '1', categoryName: '教材书籍', count: '0' }]
+      category: [{ categoryId: '1', categoryName: '教材书籍', count: '0' }],
+      trend: EMPTY_TREND
     })
 
     expect(initMock).not.toHaveBeenCalled()
     expect(wrapper.text()).toContain('暂无可统计的订单')
     expect(wrapper.text()).toContain('暂无可统计的商品')
+    expect(wrapper.text()).toContain('暂无可统计的趋势数据')
   })
 
   // ================================================================ ⑤ 五态
@@ -362,13 +417,157 @@ describe('AdminDashboardView 数据统计', () => {
     expect(getProductCategoryMock).toHaveBeenCalledTimes(2)
   })
 
-  it('⑨ 预留区：本批不含趋势图 / 热门榜（5.5.2 才做），页面上不得出现它们的入口', async () => {
+  it('⑨ 决策 3/4：不做导出、不做实时刷新；趋势与热门榜（5.5.2）都在，且不出现「近 30 天」以外的范围档', async () => {
     const { wrapper } = await mountPage()
 
-    expect(wrapper.text()).not.toContain('近 30 天')
-    expect(wrapper.text()).not.toContain('热门商品')
-    // 也没有导出按钮（决策 3：不做导出 CSV）
+    // 5.5.2 的两个区块标题必须在
+    expect(wrapper.text()).toContain('趋势')
+    expect(wrapper.text()).toContain('热门商品榜')
+
+    // 决策 3：不做导出 CSV
     const buttons = wrapper.findAll('button').map((b) => b.text())
     expect(buttons.some((t) => t.includes('导出'))).toBe(false)
+
+    // 决策 4：不做实时刷新 —— 没有定时器/轮询（只有用户点一下的手动刷新）
+    expect(buttons.some((t) => t.includes('刷新数据'))).toBe(true)
+  })
+
+  // ================================================================ 5.5.2 趋势区
+
+  it('⑩ 趋势区：三条折线 + 7 个日期，x 轴直接用后端给的 yyyy-MM-dd（前端不再格式化）', async () => {
+    const { wrapper } = await mountPage()
+
+    expect(getTrendMock).toHaveBeenCalledWith(7, { silent: true })
+
+    const lineOption = createdCharts
+      .map((chart) => chart.setOption.mock.calls[0][0])
+      .find((option) => option.series?.[0]?.type === 'line')
+
+    expect(lineOption).toBeTruthy()
+    expect(lineOption.series.map((s) => s.name)).toEqual(['订单量', '商品发布', '用户注册'])
+    expect(lineOption.series.map((s) => s.data)).toEqual([
+      TREND.orderCounts,
+      TREND.productCounts,
+      TREND.userCounts
+    ])
+    // 日期原样进轴（不重新格式化）
+    expect(lineOption.xAxis.data).toEqual(TREND.dates)
+    expect(wrapper.text()).toContain('近 7 天')
+  })
+
+  it('⑩ 补充：趋势全为 0 时**仍然画平线**（"这段时间真的没成交"是有用信息，不该换成空态）', async () => {
+    const { wrapper } = await mountPage({
+      trend: {
+        days: 7,
+        dates: TREND.dates,
+        orderCounts: [0, 0, 0, 0, 0, 0, 0],
+        productCounts: [0, 0, 0, 0, 0, 0, 0],
+        userCounts: [0, 0, 0, 0, 0, 0, 0]
+      }
+    })
+
+    const lineOption = createdCharts
+      .map((chart) => chart.setOption.mock.calls[0][0])
+      .find((option) => option.series?.[0]?.type === 'line')
+    expect(lineOption.series[0].data).toEqual([0, 0, 0, 0, 0, 0, 0])
+    expect(wrapper.text()).not.toContain('暂无可统计的趋势数据')
+  })
+
+  it('⑪ 范围切换：点「近 30 天」只重新拉趋势（days=30），概览/分布/热门榜不重复请求', async () => {
+    const { wrapper } = await mountPage()
+    expect(getTrendMock).toHaveBeenCalledTimes(1)
+    expect(getOverviewMock).toHaveBeenCalledTimes(1)
+    expect(getHotMock).toHaveBeenCalledTimes(1)
+
+    // el-radio-button 渲染成原生 radio input：setValue 会选中并触发 change
+    const radios = wrapper.findAll('.el-radio-button__original-radio')
+    expect(radios).toHaveLength(2) // 只有 7 / 30 两档
+    await radios[1].setValue()
+    await flushPromises()
+
+    expect(getTrendMock).toHaveBeenCalledTimes(2)
+    expect(getTrendMock.mock.calls[1][0]).toBe(30)
+    // 只有趋势重新请求：其它区块与天数无关，不该被带着刷一遍
+    expect(getOverviewMock).toHaveBeenCalledTimes(1)
+    expect(getOrderStatusMock).toHaveBeenCalledTimes(1)
+    expect(getProductCategoryMock).toHaveBeenCalledTimes(1)
+    expect(getHotMock).toHaveBeenCalledTimes(1)
+  })
+
+  // ================================================================ 5.5.2 热门榜区
+
+  it('⑫ 热门榜：Top 列表渲染（排名/标题/分类/订单数），分类为 null 时显示「—」', async () => {
+    const { wrapper } = await mountPage()
+
+    // 榜单固定近 7 天 + Top 10（决策 2；接口保留 days 参数但前端只传 7）
+    expect(getHotMock).toHaveBeenCalledWith(7, 10, { silent: true })
+
+    const bodyRows = wrapper.findAll('.admin-stats__hot-table .el-table__body tbody tr')
+    expect(bodyRows).toHaveLength(3)
+    expect(bodyRows[0].text()).toContain('1')
+    expect(bodyRows[0].text()).toContain('二手高等数学教材（第三版）')
+    expect(bodyRows[0].text()).toContain('教材书籍')
+    expect(bodyRows[0].text()).toContain('5')
+    // categoryName 为空 → 占位符「—」（后端 null，文案由前端出）
+    expect(bodyRows[2].text()).toContain('—')
+    expect(bodyRows[2].text()).toContain('小米台灯')
+  })
+
+  it('⑬ 热门榜空态：近 7 天没有订单 → 「近 7 天暂无成交」，且不渲染表格', async () => {
+    const { wrapper } = await mountPage({ hot: [] })
+
+    expect(wrapper.text()).toContain('近 7 天暂无成交')
+    expect(wrapper.find('.admin-stats__hot-table').exists()).toBe(false)
+  })
+
+  it('⑭ 区块隔离：趋势失败不影响热门榜与概览（反之亦然），各自显示自己的错误态', async () => {
+    const { wrapper } = await mountPage({ trendReject: '趋势接口超时' })
+
+    // 趋势区：自己的错误态 + 自己的重试按钮
+    expect(wrapper.find('[data-region="trend-error"]').exists()).toBe(true)
+    expect(wrapper.text()).toContain('趋势接口超时')
+    expect(wrapper.findAll('button').some((b) => b.text().includes('重新加载趋势'))).toBe(true)
+
+    // 热门榜与概览区**不受影响**
+    expect(wrapper.find('[data-region="hot-error"]').exists()).toBe(false)
+    expect(wrapper.findAll('.admin-stats__hot-table .el-table__body tbody tr')).toHaveLength(3)
+    expect(wrapper.findAll('.admin-stats__card')).toHaveLength(4)
+    // 页面级状态机没有被区块级失败带偏（仍是 success）
+    expect(wrapper.text()).not.toContain('加载失败，请重试')
+
+    // 反向：热门榜失败不影响趋势
+    const { wrapper: second } = await mountPage({ hotReject: '榜单接口超时' })
+    expect(second.find('[data-region="hot-error"]').exists()).toBe(true)
+    expect(second.find('[data-region="trend-error"]').exists()).toBe(false)
+    expect(second.findAll('.admin-stats__card')).toHaveLength(4)
+    expect(second.text()).not.toContain('加载失败，请重试')
+  })
+
+  it('⑭ 补充：区块级 403 → 该区块给出权限提示（不冒充成网络故障）', async () => {
+    const { wrapper } = await mountPage({ trendReject: 'forbidden' })
+
+    expect(wrapper.find('[data-region="trend-error"]').exists()).toBe(true)
+    expect(wrapper.text()).toContain('没有查看统计数据的权限')
+  })
+
+  it('⑮ 刷新按钮：概览 + 分布 + 趋势 + 热门榜 五个接口全部重新请求', async () => {
+    const { wrapper } = await mountPage()
+    expect(getTrendMock).toHaveBeenCalledTimes(1)
+    expect(getHotMock).toHaveBeenCalledTimes(1)
+
+    const refresh = wrapper.findAll('button').find((b) => b.text().includes('刷新数据'))
+    await refresh.trigger('click')
+    await flushPromises()
+
+    expect(getOverviewMock).toHaveBeenCalledTimes(2)
+    expect(getOrderStatusMock).toHaveBeenCalledTimes(2)
+    expect(getProductCategoryMock).toHaveBeenCalledTimes(2)
+    expect(getTrendMock).toHaveBeenCalledTimes(2)
+    expect(getHotMock).toHaveBeenCalledTimes(2)
+    // 页面级 loading 会把内容区换成骨架屏 → 3 张图随之卸载（dispose）并被重建新实例，
+    // 所以 init 次数是 3 + 3；关键是**旧实例都被 dispose 了**，不会累积泄漏
+    expect(initMock).toHaveBeenCalledTimes(6)
+    expect(createdCharts.slice(0, 3).every((chart) => chart.dispose.mock.calls.length === 1)).toBe(true)
+    expect(wrapper.findAllComponents(StatChart)).toHaveLength(3)
   })
 })

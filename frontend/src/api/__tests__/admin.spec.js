@@ -38,9 +38,11 @@ import {
   forceRefundOrder,
   getAdminOrderList,
   getAdminProductList,
+  getAdminStatsHotProducts,
   getAdminStatsOrderStatus,
   getAdminStatsOverview,
   getAdminStatsProductCategory,
+  getAdminStatsTrend,
   getAdminUserList,
   getAuditLogList,
   migrateCategory,
@@ -192,5 +194,76 @@ describe('api/admin 接口契约', () => {
     await getAdminStatsOverview({ silent: true })
 
     expect(configOf(getMock, 0).silent).toBe(true)
+  })
+
+  // ---------------- 5.5.2 趋势 / 热门榜 ----------------
+
+  it('统计 · 趋势（5.5.2）：参数只带 days，字符串计数在 **api 层**归一化成 number，日期原样透传', async () => {
+    getMock.mockResolvedValue({
+      days: '7',
+      dates: ['2026-09-12', '2026-09-13'],
+      orderCounts: ['0', '36'],
+      productCounts: ['3', '2'],
+      userCounts: ['0', '5']
+    })
+
+    const data = await getAdminStatsTrend(7)
+
+    expect(getMock.mock.calls[0][0]).toBe('/admin/stats/trend')
+    expect(configOf(getMock).params).toEqual({ days: 7 })
+    expect(data.days).toBe(7)
+    // 日期是后端序列化好的字符串：原样透传，**不做任何格式化**
+    expect(data.dates).toEqual(['2026-09-12', '2026-09-13'])
+    // 计数是 "0"/"36" 这种字符串（Long → String），api 层已经转成 number
+    expect(data.orderCounts).toEqual([0, 36])
+    expect(data.productCounts).toEqual([3, 2])
+    expect(data.userCounts).toEqual([0, 5])
+    expect(typeof data.orderCounts[1]).toBe('number')
+  })
+
+  it('统计 · 趋势：后端给残缺数据（无 dates / 无计数）时返回空数组与 0，绝不返回 null', async () => {
+    getMock.mockResolvedValue({})
+
+    const data = await getAdminStatsTrend(30)
+
+    expect(configOf(getMock).params).toEqual({ days: 30 })
+    expect(data).toEqual({ days: 30, dates: [], orderCounts: [], productCounts: [], userCounts: [] })
+  })
+
+  it('统计 · 热门榜（5.5.2）：productId 保持字符串（禁止 Number(id)），orderCount 转 number，null 分类变空串', async () => {
+    getMock.mockResolvedValue({
+      days: '7',
+      items: [
+        { productId: '14', productTitle: '二手高等数学教材（第三版）', categoryName: '教材书籍', orderCount: '5' },
+        // 商品已删除：categoryName 被 Jackson 的 non_null 策略整个省略
+        { productId: '21', productTitle: '英语四级真题册', orderCount: '2' }
+      ]
+    })
+
+    const data = await getAdminStatsHotProducts(7, 10)
+
+    expect(getMock.mock.calls[0][0]).toBe('/admin/stats/hot-products')
+    expect(configOf(getMock).params).toEqual({ days: 7, limit: 10 })
+    expect(data.days).toBe(7)
+    expect(data.items[0]).toEqual({
+      productId: '14',
+      productTitle: '二手高等数学教材（第三版）',
+      categoryName: '教材书籍',
+      orderCount: 5
+    })
+    // id 全程字符串（雪花 Long 超 2^53，Number() 会丢精度）
+    expect(typeof data.items[0].productId).toBe('string')
+    expect(typeof data.items[0].orderCount).toBe('number')
+    // 缺失的分类名归一化成空串（页面显示「—」），不是 undefined
+    expect(data.items[1].categoryName).toBe('')
+  })
+
+  it('统计 · 热门榜：无数据（items 缺失）时返回空数组，days 用入参兜底', async () => {
+    getMock.mockResolvedValue({ days: '7' })
+
+    const data = await getAdminStatsHotProducts(7, 10)
+
+    expect(data.items).toEqual([])
+    expect(data.days).toBe(7)
   })
 })

@@ -15,20 +15,26 @@
  *      不 dispose 就会随每次进入路由累积。
  *
  * props：
- *   · type     'pie' | 'bar'
- *   · data     [{ name, value, tone? , color? }]
+ *   · type     'pie' | 'bar' | 'line'
+ *   · data     [{ name, value, tone?, color? }] —— pie / bar 用
+ *   · dates    ['2026-09-12', ...] —— line 的 x 轴（后端序列化好的 yyyy-MM-dd，不再格式化）
+ *   · series   [{ name, data: number[], tone? }] —— line 的多条折线
  *   · options  顶层覆盖项（浅合并），例如 tooltip.formatter 这类业务文案
  *   · height   容器高度（图表容器必须有确定高度，否则 canvas 高度为 0 → 白屏）
  */
-import { onMounted, onUnmounted, ref, watch } from 'vue'
+import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
 import echarts from '@/utils/echarts'
-import { buildStatChartOption } from '@/components/admin/statChartOptions'
+import { buildStatChartOption, buildTrendLineOption } from '@/components/admin/statChartOptions'
 
 const props = defineProps({
   /** 图表类型 */
   type: { type: String, default: 'pie' },
-  /** 数据：[{ name, value, tone, color }] */
+  /** 数据：[{ name, value, tone, color }]（pie / bar） */
   data: { type: Array, default: () => [] },
+  /** x 轴日期（line），如 ['2026-09-12', ...] */
+  dates: { type: Array, default: () => [] },
+  /** 多条折线（line）：[{ name, data: number[], tone }] */
+  series: { type: Array, default: () => [] },
   /** 顶层覆盖项（浅合并进默认 option） */
   options: { type: Object, default: () => ({}) },
   /** 容器高度 */
@@ -45,10 +51,22 @@ let chart = null
  *
  * ECharts 对空数据会画出一片空白坐标系（页面上看起来像"图表坏了"），
  * 所以空态一律由页面用 v-if 换成占位说明，组件本身不渲染半成品。
+ *
+ * ⚠️ 折线图的判据是「有没有日期轴」，不是「计数是不是全 0」：
+ *    近 7 天一笔订单都没有时，一条贴着 0 的平线是**有意义的信息**
+ *    （说明这段时间真的没成交），比换成"暂无数据"更准确。
  */
-const isEmpty = () => !Array.isArray(props.data) || props.data.length === 0
+const isEmpty = () => {
+  if (props.type === 'line') {
+    return !Array.isArray(props.dates) || props.dates.length === 0
+  }
+  return !Array.isArray(props.data) || props.data.length === 0
+}
 
 function buildOption() {
+  if (props.type === 'line') {
+    return buildTrendLineOption({ dates: props.dates, series: props.series, options: props.options })
+  }
   return buildStatChartOption({ type: props.type, data: props.data, options: props.options })
 }
 
@@ -73,7 +91,7 @@ function createChart() {
 onMounted(createChart)
 
 watch(
-  () => [props.data, props.type, props.options],
+  () => [props.data, props.dates, props.series, props.type, props.options],
   () => {
     // 数据从「空 → 有」时容器才第一次出现（v-if 控制），需要补一次 init
     createChart()
@@ -91,6 +109,12 @@ onUnmounted(() => {
 
 /** 暴露给测试：option 是纯函数产物，直接断言它比去翻 canvas 稳得多 */
 defineExpose({ buildOption })
+
+/** 无障碍描述：折线图按"共几天"说，饼图/条形图按"共几项"说 */
+const ariaLabel = computed(() => {
+  if (props.type === 'line') return `折线图：共 ${props.dates.length} 天`
+  return `${props.type === 'bar' ? '条形图' : '饼图'}：共 ${props.data.length} 项`
+})
 </script>
 
 <template>
@@ -99,7 +123,7 @@ defineExpose({ buildOption })
     class="stat-chart"
     :style="{ height }"
     role="img"
-    :aria-label="`${type === 'bar' ? '条形图' : '饼图'}：共 ${data.length} 项`"
+    :aria-label="ariaLabel"
   />
 </template>
 
