@@ -119,6 +119,13 @@ knife4j:
 app:
   jwt:
     # 严禁硬编码: 必须由环境变量注入, 长度 >= 32 字节
+    #
+    # ⚠️ 下面这个默认值【仅用于本地开发 / 答辩演示】。仓库是 Public，本值已公开，
+    #    拿到它的人可以自签任意 userId / role=1 的 Token 冒充管理员。
+    #    生产环境（application-prod.yml）写的是 `secret: ${JWT_SECRET}`（无默认值）：
+    #      · 未注入 JWT_SECRET → 不会退回到本默认值，而是由 JwtUtils.init() 的启动断言
+    #        抛出明确异常并中止启动（实测：绑定到字段上的是未替换的字面量 ${JWT_SECRET}）；
+    #      · 即使有人手工把 JWT_SECRET 设成本默认值 → prod 下同样被该断言拦下（双保险）。
     secret: ${JWT_SECRET:campus-market-dev-secret-key-please-override-in-env-32bytes}
     expire-hours: ${JWT_EXPIRE_HOURS:2}
     issuer: campus-market
@@ -143,9 +150,11 @@ app:
       secret-key: ${MINIO_SECRET_KEY:}
       bucket: ${MINIO_BUCKET:campus-market}
 
-  # 邮件降级开关: 开发/答辩环境默认 true, 验证码直接返回, 不依赖 SMTP
+  # 邮件降级开关: 默认 false(安全)。本地开发/答辩若不想依赖 SMTP, 显式设 EMAIL_SKIP=true。
+  # ⚠️ skip=true 时验证码不再走 SMTP —— 仅 dev profile 会把验证码放进接口响应体(方便开发)；
+  #    非 dev 环境一律不回显，prod 环境还会由 EmailCodeServiceImpl 的启动断言直接拒绝启动。
   email:
-    skip: ${EMAIL_SKIP:true}
+    skip: ${EMAIL_SKIP:false}
     code-expire-seconds: 300
     limit-seconds: 60
     fail-lock-threshold: 5

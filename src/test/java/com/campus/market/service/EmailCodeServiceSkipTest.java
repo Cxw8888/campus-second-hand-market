@@ -28,6 +28,12 @@ import static org.mockito.Mockito.verifyNoInteractions;
  * properties 写一遍——否则将来有人在 dev 配置里把它改成 false，这条用例会静默地
  * 转去测真实 SMTP 分支（并且因为 mailSender 是 mock、没打桩而报错），失去原本的验证意图。</p>
  *
+ * <p><b>6.0.1 起增加一个隐含前提</b>：验证码"回显"还需要当前 profile 是 dev
+ * （非 dev 即使 skip=true 也只写日志、不回显，见 {@code EmailCodeServiceImpl#send}）。
+ * 本用例没有 {@code @ActiveProfiles}，profile 取自 {@code application.yml} 的默认值 dev，
+ * 所以回显成立。若将来有人给这个测试类加上别的 profile，这里的"验证码非空"断言会失败——
+ * 那正是我们想要的行为（说明回显被正确地关掉了）。</p>
+ *
  * <p>用 {@code @MockBean}：Spring Boot 3.2.5，{@code @MockitoBean} 要 3.4+。</p>
  */
 @SpringBootTest(properties = "app.email.skip=true")
@@ -71,7 +77,7 @@ class EmailCodeServiceSkipTest {
                 .as("skip=true 时响应必须标记为降级模式")
                 .isTrue();
         assertThat(vo.getCode())
-                .as("降级模式下验证码必须直接返回（生产 skip=false 时此字段为 null）")
+                .as("降级模式下验证码必须直接返回（6.0.1 起仅 dev profile 回显；非 dev / skip=false 时为 null）")
                 .isNotNull()
                 .matches("\\d{6}");
         assertThat(vo.getExpireSeconds())

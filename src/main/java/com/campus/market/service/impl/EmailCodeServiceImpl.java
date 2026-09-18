@@ -1,13 +1,16 @@
 package com.campus.market.service.impl;
 
+import com.campus.market.common.constant.ProfileConstants;
 import com.campus.market.common.constant.RedisKeys;
 import com.campus.market.common.enums.ErrorCode;
 import com.campus.market.common.exception.BusinessException;
 import com.campus.market.config.properties.EmailProperties;
 import com.campus.market.service.EmailCodeService;
 import com.campus.market.vo.EmailCodeVO;
+import jakarta.annotation.PostConstruct;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.core.env.Environment;
 import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.mail.MailException;
 import org.springframework.mail.SimpleMailMessage;
@@ -29,7 +32,9 @@ import java.util.regex.Pattern;
  *   <li><b>发送限流</b>：{@code email:limit:{email}} 已存在 → code=106（TTL = limitSeconds）；</li>
  *   <li><b>失败计量不可重置</b>：{@code email:fail:{email}} 在 failWindowSeconds 窗口内累计，
  *       达 failLockThreshold 次即视为锁定 → code=107；重新获取验证码<b>严禁删除</b>该 Key；</li>
- *   <li><b>降级开关</b>：skip=true 时验证码直接返回并打印日志（可打印验证码，<b>不可打印密码</b>）；</li>
+ *   <li><b>降级开关（6.0.1 加固）</b>：skip=true 时不走 SMTP，验证码只写后端日志；
+ *       <b>仅 dev profile</b> 才额外回显到响应体（方便本地开发/答辩），非 dev 一律不回显；
+ *       并且 prod + skip=true 会在启动时直接失败（见 {@link #assertSkipNotUsedInProd()}）；</li>
  *   <li><b>发送异常</b>：捕获 {@link MailException} → 删除本次验证码 → code=105；</li>
  *   <li><b>Redis 故障降级</b>：读写异常仅 log.warn，不因缓存不可用阻断主流程。</li>
  * </ol>
@@ -51,6 +56,27 @@ public class EmailCodeServiceImpl implements EmailCodeService {
     private final StringRedisTemplate redisTemplate;
     private final EmailProperties emailProperties;
     private final JavaMailSender mailSender;
+
+    /** 用于判定"是否 dev / prod"（生产环境安全断言的唯一依据）。 */
+    private final Environment environment;
+
+    /**
+     * 启动断言（安全加固 6.0.1 · S2）：prod 环境禁止 skip=true。
+     *
+     * <p>为什么必须 fail-fast 而不是打个 warn：skip=true 时验证码不再发送、而是（在 dev 下）
+     * 直接进接口响应体，而获取验证码与找回密码都是<b>公开路径</b> ——
+     * 一旦带着这个开关上线，任何人只要知道受害者校园邮箱就能重置其密码，
+     * 属于"配置失误等于账号被接管"。宁可启动失败，也不能静默降级。</p>
+     */
+    @PostConstruct
+    void assertSkipNotUsedInProd() {
+        if (emailProperties.isSkip() && ProfileConstants.isProd(environment.getActiveProfiles())) {
+            throw new IllegalStateException("生产环境(prod)禁止 app.email.skip=true —— "
+                    + "该开关会让验证码不再发送(dev 下还会回显到响应体)，"
+                    + "而 /auth/email-code 与 /auth/reset-password 是公开路径，等于任意账号可被接管。"
+                    + "请关闭 EMAIL_SKIP 并配置真实 SMTP。");
+        }
+    }
 
     @Override
     public EmailCodeVO send(String email, String scene) {
@@ -79,10 +105,21 @@ public class EmailCodeServiceImpl implements EmailCodeService {
         }
 
         if (emailProperties.isSkip()) {
-            // 毕设降级：不依赖 SMTP，验证码直接返回（仅验证码可打印，严禁打印密码）
-            log.info("【邮箱验证码·降级模式】email={}, scene={}, code={}, expire={}s",
-                    maskEmail(normalized), scene, code, expireSeconds);
-            return new EmailCodeVO(true, code, expireSeconds);
+            // 降级模式：不依赖 SMTP。验证码只写后端日志（可打印验证码，严禁打印密码）。
+            // ⚠️ 6.0.1 加固：**只有 dev profile 才把验证码回显到响应体**。
+            //    非 dev（例如自定义 staging / test profile）即使开了 skip，也只写日志、不回显 ——
+            //    因为 /auth/email-code 是公开路径，回显等于"任何人可拿别人邮箱的验证码"。
+            //    （prod + skip=true 更早一步：启动断言会直接拒绝启动。）
+            boolean echoCode = ProfileConstants.isDev(environment.getActiveProfiles());
+            if (echoCode) {
+                log.info("【邮箱验证码·降级模式(dev 回显)】email={}, scene={}, code={}, expire={}s",
+                        maskEmail(normalized), scene, code, expireSeconds);
+            } else {
+                log.warn("【邮箱验证码·降级模式(不回显)】email={}, scene={}, code={}, expire={}s —— "
+                                + "当前 profile 非 dev，验证码仅记录在本日志中，请从日志获取",
+                        maskEmail(normalized), scene, code, expireSeconds);
+            }
+            return new EmailCodeVO(true, echoCode ? code : null, expireSeconds);
         }
 
         // ④ 真实发送：MailException → 删除本次验证码 → 105

@@ -10,8 +10,16 @@ import java.io.Serializable;
 /**
  * 邮箱验证码响应 VO（接口 1.4 GET /api/v1/auth/email-code）。
  *
- * <p>毕设降级开关 {@code app.email.skip=true} 时，{@code skip=true} 且 {@code code} 直接返回；
- * 生产环境 {@code skip=false} 时 {@code code} 为 {@code null}，验证码仅通过邮件下发。</p>
+ * <p>验证码是否出现在 {@link #code} 字段，取决于 <b>降级开关 + profile</b> 两个条件
+ * （批次 6.0.1 安全加固后的规则，比原来"skip=true 就回显"更严）：</p>
+ * <ul>
+ *   <li>{@code skip=false}（默认 / 生产）→ {@code code} 为 {@code null}，验证码只走邮件；</li>
+ *   <li>{@code skip=true} 且 <b>dev profile</b> → {@code code} 回显（本地开发 / 答辩演示用）；</li>
+ *   <li>{@code skip=true} 且非 dev → {@code code} 仍为 {@code null}，验证码只写后端日志
+ *       （因为本接口是公开路径，回显等于"任何人可拿别人邮箱的验证码"）；</li>
+ *   <li>{@code skip=true} 且 prod → 应用<b>启动即失败</b>（{@code EmailCodeServiceImpl} 的启动断言），
+ *       所以这一组合在运行时不可达。</li>
+ * </ul>
  */
 @Data
 @NoArgsConstructor
