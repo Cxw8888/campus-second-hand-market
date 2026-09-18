@@ -123,6 +123,20 @@ const routes = [
         redirect: { name: 'admin-product-audit' }
       },
       {
+        // 数据统计放在最前面（5.5.1）：管理员进后台第一眼通常是"整体盘子有多大"，
+        // 再看具体待办；/admin 的 landing 仍是商品审核（不改变既有行为）
+        //
+        // 权限 meta（requiresAuth / requiresAdmin / admin）**不在这里重复写**：
+        // 父级 /admin 已经声明，vue-router 会把 matched 上的 meta 合并进 to.meta，
+        // 子路由自动继承 —— 与 admin-product-audit / admin-user / admin-order /
+        // admin-category / admin-audit-log 五个兄弟路由完全一致。
+        // （继承这件事不靠"看起来像"，adminGuard.spec.js 里有用例直接断言。）
+        path: 'dashboard',
+        name: 'admin-dashboard',
+        component: () => import('@/views/admin/AdminDashboardView.vue'),
+        meta: { title: '数据统计' }
+      },
+      {
         path: 'product/audit',
         name: 'admin-product-audit',
         component: () => import('@/views/admin/AdminProductAuditView.vue'),

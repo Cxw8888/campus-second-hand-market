@@ -38,6 +38,9 @@ import {
   forceRefundOrder,
   getAdminOrderList,
   getAdminProductList,
+  getAdminStatsOrderStatus,
+  getAdminStatsOverview,
+  getAdminStatsProductCategory,
   getAdminUserList,
   getAuditLogList,
   migrateCategory,
@@ -166,5 +169,28 @@ describe('api/admin 接口契约', () => {
 
     expect(putMock.mock.calls[1][0]).toBe('/admin/category/migrate')
     expect(putMock.mock.calls[1][1]).toEqual({ fromCategoryId: '9', toCategoryId: '2' })
+  })
+
+  it('统计三接口（5.5.1）：路径正确、无 query 参数、默认 silent=false（页面自己传 true）', async () => {
+    await getAdminStatsOverview()
+    await getAdminStatsOrderStatus()
+    await getAdminStatsProductCategory()
+
+    expect(getMock.mock.calls.map((c) => c[0])).toEqual([
+      '/admin/stats/overview',
+      '/admin/stats/order-status',
+      '/admin/stats/product-category'
+    ])
+    // 三个接口都不接受任何参数：多传 query 只会让后端莫名其妙
+    expect(configOf(getMock, 0).params ?? {}).toEqual({})
+    expect(configOf(getMock, 1).params ?? {}).toEqual({})
+    expect(configOf(getMock, 2).params ?? {}).toEqual({})
+    expect(configOf(getMock, 0).silent).toBe(false)
+  })
+
+  it('统计三接口：silent=true 时原样透传（页面自己渲染错误态，不要拦截器弹 toast）', async () => {
+    await getAdminStatsOverview({ silent: true })
+
+    expect(configOf(getMock, 0).silent).toBe(true)
   })
 })

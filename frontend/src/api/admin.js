@@ -198,3 +198,56 @@ export function deleteCategory(id) {
 export function migrateCategory(fromCategoryId, toCategoryId) {
   return request.put('/admin/category/migrate', { fromCategoryId, toCategoryId })
 }
+
+// ================================================================ 数据统计（批次 5.5.1）
+
+/**
+ * 统计接口的三个共同约定（写页面前必读）：
+ *
+ * ① **Long 一律是字符串**：JacksonConfig 把 Long 序列化成 String（防 JS 精度丢失），
+ *    所以拿到手的是 `"100"` 而不是 `100`。计数值展示前要 Number()（计数不是 id，
+ *    Number() 在这里是安全的；id / orderNo 才严禁转换）。
+ * ② **后端有 60 秒缓存**（`admin:stats:*` 前缀，TTL 60s + 0~10s 抖动，无主动失效）：
+ *    刚做的管理操作不会立刻反映到数字上，这是设计而非 bug，页面上已写明。
+ * ③ **403 是 HTTP 200 + body.code=403**（非管理员）：页面必须单独渲染"无权限"态，
+ *    而不是"加载失败"态。所以这三处都支持 `silent`，由页面自己出错误态。
+ */
+
+/**
+ * 概览卡片：8 个数字一次取回
+ *
+ * @param {{ silent?: boolean }} [options]
+ * @returns {Promise<{userTotal, userTodayNew, productTotal, productTodayNew,
+ *   orderTotal, orderTodayNew, gmvTotal, gmvToday}>}
+ *   计数是**字符串**，金额（gmvTotal / gmvToday）是 JSON number（BigDecimal 不做字符串化）
+ */
+export function getAdminStatsOverview({ silent = false } = {}) {
+  return request.get('/admin/stats/overview', { silent })
+}
+
+/**
+ * 订单状态分布：**恒定 8 条**（0~7 全量补齐，无数据 count=0）
+ *
+ * ⚠️ 响应里**没有 label**（后端不硬编码状态文案）：状态名一律由前端
+ *    `orderStatusLabel(status)` 从 constants.js 的 ORDER_STATUS_MAP 取。
+ *
+ * @param {{ silent?: boolean }} [options]
+ * @returns {Promise<Array<{status: number, count: string}>>}
+ */
+export function getAdminStatsOrderStatus({ silent = false } = {}) {
+  return request.get('/admin/stats/order-status', { silent })
+}
+
+/**
+ * 商品分类分布：以分类为主表，**空分类 count=0 也会返回**
+ *
+ * ⚠️ 孤儿商品（分类已被逻辑删除）是最后一条，且 `categoryId` / `categoryName` 会被
+ *    Jackson 的 non_null 策略整个省略 → 拿到的是**字段缺失**而不是 null，
+ *    判断用 `item.categoryId == null`（能同时兜住两种）。
+ *
+ * @param {{ silent?: boolean }} [options]
+ * @returns {Promise<Array<{categoryId?: string, categoryName?: string, count: string}>>}
+ */
+export function getAdminStatsProductCategory({ silent = false } = {}) {
+  return request.get('/admin/stats/product-category', { silent })
+}

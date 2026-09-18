@@ -456,6 +456,27 @@ export function adminOrderStatusTabLabel(status) {
 /** 分类名长度上限（后端 CategorySaveRequest.java:20 是 @Size(max=50)） */
 export const CATEGORY_NAME_MAX = 50
 
+// ------------------------------------------------------------------ 管理端数据统计（5.5.1）
+
+/**
+ * 统计结果的缓存时长（秒）—— 后端 `AdminStatsServiceImpl` 的 CACHE_TTL_SECONDS 镜像。
+ *
+ * ⚠️ 与 PAY_TIMEOUT_MINUTES 一样，这是**后端事实**在前端的镜像：后端统计接口
+ *    （/api/v1/admin/stats/*）走 `admin:stats:*` 缓存，TTL 60 秒 + 0~10 秒随机抖动，
+ *    **没有主动失效**（统计是只读的，60 秒自然过期足够）。
+ *    所以页面上必须写明"数据可能最多滞后 60 秒"，否则管理员刚封完号发现数字没动会以为坏了。
+ *    改了后端 TTL，这里要跟着改。
+ */
+export const ADMIN_STATS_CACHE_SECONDS = 60
+
+/**
+ * 商品分类分布里「分类已被逻辑删除」的孤儿商品的展示名。
+ *
+ * 后端对这类商品返回的 categoryId / categoryName 是 null（Jackson 的 non_null 策略下
+ * 字段会整个消失），**文案必须由前端出**：后端不硬编码任何展示文案，只有数字与名称。
+ */
+export const ADMIN_STATS_UNCATEGORIZED_LABEL = '未分类（分类已删除）'
+
 /**
  * 分类排序权重的前端兜底范围
  *

@@ -169,4 +169,40 @@ describe('管理端路由守卫', () => {
     await router.push('/admin/audit-log')
     expect(router.currentRoute.value.name).toBe('admin-audit-log')
   })
+
+  it('⑨ 5.5.1 新增的 /admin/dashboard 同样受角色保护，且 meta 全部从父级 /admin 继承', async () => {
+    // ① 路由表层面：子路由 meta 里只有 title，权限靠父级继承 —— 这里把继承结果钉死，
+    //    免得将来有人把 meta 挪到子路由却漏掉某一项（漏了 requiresAdmin 就是真漏洞）
+    const resolved = router.resolve('/admin/dashboard')
+    expect(resolved.name).toBe('admin-dashboard')
+    expect(resolved.meta.title).toBe('数据统计')
+    expect(resolved.meta.requiresAuth).toBe(true)
+    expect(resolved.meta.requiresAdmin).toBe(true)
+    expect(resolved.meta.admin).toBe(true)
+
+    // ② 普通用户（role=0）→ /403（不是登录页）
+    setToken('student-token')
+    const userStore = useUserStore()
+    userStore.userInfo = { userId: '17', nickname: '买家同学', role: 0 }
+    await router.push({ name: 'home' })
+    await router.push('/admin/dashboard')
+    expect(router.currentRoute.value.name).toBe('forbidden')
+    expect(router.currentRoute.value.query.from).toBe('admin')
+
+    // ③ 未登录 → 登录页 + redirect（回来还能接着进）
+    localStorage.clear()
+    setActivePinia(createPinia())
+    await router.push({ name: 'home' })
+    await router.push('/admin/dashboard')
+    expect(router.currentRoute.value.name).toBe('login')
+    expect(router.currentRoute.value.query.redirect).toBe('/admin/dashboard')
+
+    // ④ 管理员 → 正常进入
+    setToken('admin-token')
+    const adminStore = useUserStore()
+    adminStore.userInfo = { userId: '1', nickname: '管理员', role: 1 }
+    await router.push({ name: 'home' })
+    await router.push('/admin/dashboard')
+    expect(router.currentRoute.value.name).toBe('admin-dashboard')
+  })
 })

@@ -10,8 +10,8 @@
  * 登录态是**复用**的（不做第二个登录页）：能不能进这个壳由路由守卫按 role===1 决定，
  * 后端侧的真正把关是 AuthInterceptor 的 @RequireRole(1)。
  *
- * 菜单：5.1 商品审核 / 5.2 用户管理·订单管理 / 5.3 分类管理·审计日志 —— 五个入口现已全部接上真实路由，
- * 管理端不再有"禁用占位"项；「待开放」分组随之移除。
+ * 菜单：5.1 商品审核 / 5.2 用户管理·订单管理 / 5.3 分类管理·审计日志 / 5.5.1 数据统计 ——
+ * 六个入口现已全部接上真实路由，管理端不再有"禁用占位"项；「待开放」分组随之移除。
  */
 import { computed } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
@@ -19,6 +19,7 @@ import { ElMessage } from 'element-plus'
 import {
   ArrowLeft,
   CollectionTag,
+  DataAnalysis,
   Goods,
   List,
   SwitchButton,
@@ -35,8 +36,11 @@ const userStore = useUserStore()
 const username = computed(() => userStore.displayName)
 const avatarLabel = computed(() => (username.value || '管').trim().charAt(0))
 
-/** 已实现的菜单（一律命名路由，不写 path 字符串）：5.1 商品审核 / 5.2 用户·订单 / 5.3 分类·审计 */
+/**
+ * 菜单顺序：数据统计排第一（先看全局盘子，再看待办），其余保持 5.1~5.3 的既有顺序。
+ */
 const menus = [
+  { name: 'admin-dashboard', label: '数据统计', icon: DataAnalysis },
   { name: 'admin-product-audit', label: '商品审核', icon: Goods },
   { name: 'admin-user', label: '用户管理', icon: User },
   { name: 'admin-order', label: '订单管理', icon: List },
