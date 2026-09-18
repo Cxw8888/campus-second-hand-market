@@ -64,6 +64,15 @@ public final class RedisKeys {
     /** 支付回调流水去重。 */
     public static final String PAY_CALLBACK_PREFIX = "pay:callback:";
 
+    /**
+     * 管理端统计缓存前缀（批次 5.5.1）。
+     *
+     * <p><b>刻意与 {@code search:} 完全分开</b>：搜索缓存里存的是分页商品列表（含 user/order 维度），
+     * 统计缓存里存的是聚合数字，两者的失效节奏、排查手段、甚至"要不要清"都不同
+     * （5.4.5 实测：多实例共享 Redis 时清缓存必须按前缀精确清，混用前缀会误伤另一半功能）。</p>
+     */
+    public static final String ADMIN_STATS_PREFIX = "admin:stats:";
+
     // ---------------- Key 构建方法 ----------------
 
     /** user:token:version:{userId} */
@@ -129,5 +138,20 @@ public final class RedisKeys {
     /** product:detail:{productId} */
     public static String productDetail(Long productId) {
         return PRODUCT_DETAIL_PREFIX + productId;
+    }
+
+    /** admin:stats:overview */
+    public static String adminStatsOverview() {
+        return ADMIN_STATS_PREFIX + "overview";
+    }
+
+    /** admin:stats:order-status */
+    public static String adminStatsOrderStatus() {
+        return ADMIN_STATS_PREFIX + "order-status";
+    }
+
+    /** admin:stats:product-category */
+    public static String adminStatsProductCategory() {
+        return ADMIN_STATS_PREFIX + "product-category";
     }
 }
