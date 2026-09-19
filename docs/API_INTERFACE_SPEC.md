@@ -65,12 +65,12 @@
 | 1.1 | POST | `/api/v1/auth/register` | 公开 | body: `username`(学号,50) `password`(8-20 强密码) `nickname?` `email`(校园邮箱) `emailCode` | `data`: `{userId}`；失败 100/102/103/107 |
 | 1.2 | POST | `/api/v1/auth/login` | 公开 | body: `username` `password` | `data`: `{token, userId, username, nickname, avatar, role, expiresIn}`；失败 101/104/205 |
 | 1.3 | POST | `/api/v1/auth/logout` | 强制认证 | header: `Authorization` | `data`: null；单 Token 黑名单 `jwt:blacklist:{token}`，TTL=Token 剩余时间 |
-| 1.4 | GET | `/api/v1/auth/email-code?email=&scene=` | 公开 | `scene`: `REGISTER`/`RESET_PASSWORD`/`BIND_EMAIL` | `data`: `{skip:true, code:"123456"}`（`email.skip=true` 时直接返回）；失败 102/106/107/105 |
-| 1.5 | POST | `/api/v1/auth/reset-password` | 公开 | body: `email` `emailCode` `newPassword` | `data`: null；成功后 `user:token:version+1`；失败 103/107 |
+| 1.4 | GET | `/api/v1/auth/email-code?email=&scene=` | 公开 | `scene`: `REGISTER`/`RESET_PASSWORD`/`BIND_EMAIL`（大小写不敏感，空值归一为 `VERIFY`） | `data`: `{skip:true, code:"123456"}`（`email.skip=true` 时直接返回）；失败 102/106/107/105。**验证码按场景隔离**（批次 6.0.6 · Minor 6）：Redis Key 为 `email:code:{SCENE}:{email}`，用码时 scene 必须与取码一致，否则 103（修前 Key 无 scene，注册场景取到的码可用于找回密码/换绑） |
+| 1.5 | POST | `/api/v1/auth/reset-password` | 公开 | body: `email` `emailCode` `newPassword` | `data`: null；**校验的是 `scene=RESET_PASSWORD` 的码**；成功后 `user:token:version+1`；失败 103/107 |
 | 1.6 | GET | `/api/v1/user/profile` | 强制认证 | - | `data`: `UserVO`（password 永不返回） |
 | 1.7 | PUT | `/api/v1/user/profile` | 强制认证 | body: `nickname` `phone` `avatar` | `data`: null |
 | 1.8 | PUT | `/api/v1/user/password` | 强制认证 | body: `oldPassword` `newPassword` | `data`: null；成功后 `version+1`；新密码不得与旧密码相同 |
-| 1.9 | POST | `/api/v1/user/change-email` | 强制认证 | body: `newEmail` `emailCode` `password` | `data`: null；成功后 `version+1` |
+| 1.9 | POST | `/api/v1/user/change-email` | 强制认证 | body: `newEmail` `emailCode` `password` | `data`: null；**校验的是 `scene=BIND_EMAIL` 的码**；成功后 `version+1` |
 | 1.10 | POST | `/api/v1/auth/refresh` | 预留（P2） | - | 双令牌机制，MVP 不实现 |
 
 ## 2. 商品分类 `/api/v1/category`
@@ -89,9 +89,9 @@
 | :-- | :--- | :--- | :--- | :--- | :--- |
 | 3.1 | GET | `/api/v1/product/list` | **可选认证** | `keyword?` `categoryId?` `minPrice?` `maxPrice?` `conditionLevel?` `tradeType?` `sortBy?`(price/ create_time) `order?`(asc/desc) `page` `size` | `data`: 分页 `ProductListVO`（含 `coverImage` 与 **`thumbUrl`**）；Stream 转 VO 并剔除卖家 `phone`/`email`；`is_deleted=0` 且 `status=1`（本人/管理员可见性提升见 3.2）。**检索行为（批次 5.4.4）**：关键字含 CJK 且长度 ≥ 2 → `MATCH…AGAINST`（ngram，按相关度优先）；纯 ASCII 关键字或单字 → LIKE（参数化 `CONCAT('%',#{keyword},'%')`）；无关键字 → 仍走 MyBatis-Plus 分页且**不缓存不熔断**；FULLTEXT 抛异常 → 自动降级 LIKE（仅 warn）。**结果缓存 60 秒 + 0~10 秒抖动，空结果也缓存**（无主动失效，靠 TTL）；**500ms 超时熔断**（连续 5 次超时 → 开闸 30 秒，期间返回空列表，响应结构不变） |
 | 3.2 | GET | `/api/v1/product/detail/{id}` | **可选认证** | - | `data`: `ProductDetailVO`；可见性：游客 `status=1`；登录非卖家/非管理员 `status IN (0,1,2)`；卖家本人全部状态；管理员全部状态；否则 204 |
-| 3.3 | POST | `/api/v1/product` | 强制认证 | body: `categoryId` `title` `description` `price` `stock` `conditionLevel` `tradeType` `tradeLocation?` `imageUrls[]`(1-9) | `data`: `{id}`；落库 `status=3` 待审核；校验 title 1-100、price>0、condition_level 1-4 |
+| 3.3 | POST | `/api/v1/product` | 强制认证 | body: `categoryId` `title` `description` `price` `stock` `conditionLevel` `tradeType` `tradeLocation?` `imageUrls[]`(1-9) | `data`: `{id}`；落库 `status=3` 待审核；校验 title 1-100、price>0、condition_level 1-4；**图片地址白名单**（批次 6.0.6 · Minor 8）：只接受站内前缀（`app.storage.local.url-prefix`，默认 `/static/uploads`）或 `http(s)://`，`javascript:` / `data:` / `file:` / `//host` 一律 100 |
 | 3.4 | PUT | `/api/v1/product/{id}` | 强制认证 | body 同上（全量更新语义） | `data`: null；**关键字段**（title/description/imageUrls/price/conditionLevel）变更 → `status=3`；`status=2-售罄` 时：关键字段变更同样 → `3`（批次 6.0.5.1 · M5，修前会直接回到 1-在售、跳过审核），否则按库存 `>0 → 1` / 否则 `2`；`status=0/3` → `3`；换图时**自动清理被替换掉的旧图文件**（批次 6.0.5.2 · M6-A3） |
-| 3.5 | DELETE | `/api/v1/product/{id}` | 强制认证 | - | `data`: null；存在未完成订单(0/1/2/6/7) → 207；逻辑删除后**同步清理该商品的图片文件**（原图 + 缩略图，被其它商品引用的不删；批次 6.0.5.2 · M6-A3） |
+| 3.5 | DELETE | `/api/v1/product/{id}` | 强制认证 | - | `data`: null；存在未完成订单(**0/1/2/6/7/5**) → 207（批次 6.0.6 · Minor 1 补上 5-已冻结：修前冻结订单的商品可被删除，解冻回补时因 `is_deleted=0` 命中 0 行导致库存静默丢失）；逻辑删除后**同步清理该商品的图片文件**（原图 + 缩略图，被其它商品引用的不删；批次 6.0.5.2 · M6-A3） |
 | 3.6 | GET | `/api/v1/product/my` | 强制认证 | `status?` `page` `size` | `data`: 分页 `ProductListVO`（含待审核） |
 | 3.7 | PUT | `/api/v1/product/off-shelf/{id}` | 强制认证 | - | `data`: null；卖家下架自己的商品（`status=1→0`） |
 | 3.8 | POST | `/api/v1/upload/image` | 强制认证 | `multipart/form-data`: `file` | `data`: `{url}`；校验链：≤5MB → 扩展名/Content-Type 白名单 → **魔数** → **先读图片头校验尺寸**（最大边长 8192px、总像素 ≤5000 万；批次 6.0.5.2 · M6-A1，修前先全量解码再校验 → 解压炸弹可 OOM）→ **上传配额**（`app.storage.max-files-per-user` 默认 100 张 / `max-total-size-mb-per-user` 默认 50MB，任一超限 `code=100「上传配额已满」`，Redis 计数，批次 6.0.5.2 · M6-A2）→ 落盘 `product/{userId}/{uuid}.jpg` + 400px 缩略图 `{uuid}_thumb.jpg`。※ JDK 自带 ImageIO **无 WebP 解码器**，白名单里的 webp 事实上传不进来（返回「不支持的图片格式」） |
@@ -103,11 +103,11 @@
 | # | 方法 | 路径 | 语义 | 请求 | 响应 |
 | :-- | :--- | :--- | :--- | :--- | :--- |
 | 4.1 | GET | `/api/v1/order/token` | 强制认证 | - | `data`: `{token:uuid}`；Redis `order:token:{userId}:{uuid}`，TTL 5 分钟 |
-| 4.2 | POST | `/api/v1/order` | 强制认证 | header/body: `orderToken`；body: `productId` `quantity`(`@Min(1)`) `address?`(trade_type=2/3 时 `@NotBlank`) | `data`: `{orderId, orderNo, amount, status}`；Lua 原子校验删除 Token，失败 202；CAS 扣减失败 201；商品异常 204 |
+| 4.2 | POST | `/api/v1/order` | 强制认证 | header/body: `orderToken`；body: `productId` `quantity`(**1~100**，`@Min(1)` + `@Max(100)`，批次 6.0.6 · Minor 4) `address?`(trade_type=2/3 时 `@NotBlank`) | `data`: `{orderId, orderNo, amount, status}`；Lua 原子校验删除 Token，失败 202；CAS 扣减失败 201；商品异常 204；`quantity>100` → 100 |
 | 4.3 | GET | `/api/v1/order/list` | 强制认证 | `status?` `role?`(buyer/seller) `page` `size` | `data`: 分页 `OrderVO`（含 `product_title` 快照） |
 | 4.4 | GET | `/api/v1/order/detail/{id}` | 强制认证 | - | `data`: `OrderDetailVO`；归属校验失败 203；商品已逻辑删除时用自定义 SQL 绕过逻辑删除取商品信息 |
 | 4.5 | PUT | `/api/v1/order/pay/{id}` | 强制认证（买家） | - | `status: 0→1`，`pay_time=NOW()`；冲突 209 |
-| 4.6 | POST | `/api/v1/order/pay/callback` | 公开（**HMAC-SHA256 验签**，批次 6.0.2 · S3） | body: `orderNo` `tradeNo` `timestamp`(毫秒) `sign`(**HMAC-SHA256 十六进制小写**) | 校验顺序：时间戳在 `app.pay.timestamp-window-seconds`(默认 300s) 内 → `sign` 非空 → HMAC 匹配 → 订单存在；任一失败 **code=100「回调签名校验失败」且不改状态**。`sign = HMAC-SHA256(orderNo+"|"+tradeNo+"|"+timestamp, PAY_CALLBACK_SECRET)`；通过后按 `order_no + 回调流水号` 幂等去重。未配置 `PAY_CALLBACK_SECRET` 时回调一律拒绝（fail-closed）。**遗留：payload 不含金额，接真实网关前必须补** |
+| 4.6 | POST | `/api/v1/order/pay/callback` | 公开（**HMAC-SHA256 验签**，批次 6.0.2 · S3） | body: `orderNo` `tradeNo` `timestamp`(毫秒) `sign`(**HMAC-SHA256 十六进制小写**) | 校验顺序：时间戳在 `app.pay.timestamp-window-seconds`(默认 300s) 内 → `sign` 非空 → HMAC 匹配 → 订单存在；任一失败 **code=100「回调签名校验失败」且不改状态**。`sign = HMAC-SHA256(orderNo+"|"+tradeNo+"|"+timestamp, PAY_CALLBACK_SECRET)`；通过后按 `order_no + 回调流水号` 幂等去重（`pay:callback:{orderNo}:{tradeNo}`，TTL 7 天，**读侧在事务内判定、写侧在事务提交后才落键** —— 批次 6.0.6 · Minor 9：修前在事务内 SETNX，回滚会留下"已占位但没生效"的键，同一笔流水重试被永久吞掉）。未配置 `PAY_CALLBACK_SECRET` 时回调一律拒绝（fail-closed）。**遗留：payload 不含金额，接真实网关前必须补** |
 | 4.7 | PUT | `/api/v1/order/cancel/{id}` | 强制认证（买家） | `reason?` | `status: 0→4`，`cancel_by=买家ID` + **库存回补**；买家仅可取消 status=0 |
 | 4.8 | PUT | `/api/v1/order/ship/{id}` | 强制认证（卖家） | - | `status: 1→2`，`ship_time=NOW()`，仅 `trade_type IN (2,3)`；面交发货 → 209 |
 | 4.9 | PUT | `/api/v1/order/receive/{id}` | 强制认证（买家） | - | 邮寄 `2→3`；面交 `1→3`（`trade_type=1`）；`finish_time=NOW()` |
@@ -117,6 +117,13 @@
 | 4.12 | PUT | `/api/v1/order/refund/agree/{id}` | 强制认证（卖家） | - | `6→4`，`cancel_time=NOW()` + **库存回补** |
 | 4.13 | PUT | `/api/v1/order/refund/reject/{id}` | 强制认证（卖家） | `rejectReason` | `6→7`，`refund_reject_time=NOW()`；3 天后定时任务自动恢复 1/2 |
 | 4.14 | GET | `/api/v1/order/refund/list` | 强制认证 | `role?` `page` `size` | 退款申请列表（status=6/7） |
+
+> **待支付超时自动取消（0→4，批次 6.0.6 · Minor 3 起按交易方式分档）**：`ScheduledTasks.cancelTimeoutOrders` 每 1 分钟扫描一次
+> （`@SchedulerLock` 名 `cancelTimeoutOrderTask`），阈值取自 `app.task.timeout-cancel`：
+> **邮寄单（`trade_type IN (2,3)`）默认 15 分钟**（`minutes`）、**面交单（`trade_type = 1`）默认 120 分钟**（`face-minutes`）。
+> 取消时同步**回补库存**并通知买卖双方。修前两者共用 15 分钟，面交单（约时间见面）常在买家赶路途中被系统取消。
+> ⚠️ **前端文案/倒计时尚未跟随**（`OrderSuccessView` / `OrderCreateView` / `constants.js` 仍写死"15 分钟"），
+> 列为下一批待办：倒计时应按订单 `tradeType` 取 15 分钟或 120 分钟。
 
 ## 5. 收藏 `/api/v1/favorite`
 

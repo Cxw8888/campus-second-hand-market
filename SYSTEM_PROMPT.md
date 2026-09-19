@@ -142,6 +142,16 @@ src/
 prod 下 `SecurityHeadersFilter` 下发 `Content-Security-Policy: default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; object-src 'none'; frame-ancestors 'none'; base-uri 'self'`，另有 `X-Frame-Options: DENY`、`X-Content-Type-Options: nosniff`、`Referrer-Policy: strict-origin-when-cross-origin`（dev 不下发 CSP，否则 knife4j 打不开）。
 → 前端因此**不能**引用外部 CDN 的字体/脚本/图片，也**不能**直连第三方接口（`connect-src 'self'`，所有请求都要走 `/api` 代理或同源后端）；图片只允许同源与 `data:`（Element Plus 的 data URI 图标因此可用）。改这些约定等于改生产可用性，属于架构级决策，必须先问用户。
 
+## 15. 待支付超时窗口**按交易方式分档**（6.0.6 · Minor 3）
+`app.task.timeout-cancel.minutes`（邮寄 `trade_type IN (2,3)`，默认 15 分钟）/ `face-minutes`（面交 `trade_type = 1`，默认 **120 分钟**）；定时任务每 1 分钟扫描一次，取消时回补库存并通知双方。
+→ **前端待支付文案与倒计时必须按订单 `tradeType` 取值**。当前 `OrderSuccessView` / `OrderCreateView` / `constants.js` 仍写死"15 分钟"，`PayCountdown` 会在 15 分钟 emit `expire` 并提示"已被系统自动取消"——**而后端此时并没有取消面交单**（已列入下一批待办，改前不要依赖这段文案做状态判断）。
+→ 判断"是否真的超时"只信后端返回的 `status`，不要用前端倒计时推算。
+
+## 16. 邮箱验证码按 scene 隔离（6.0.6 · Minor 6）
+Redis Key = `email:code:{SCENE}:{email}`，scene 归一化（大写 + 去空白，空值 → `VERIFY`）；**取码与用码的 scene 必须一致**，否则 `code=103`。
+→ 前端调 `/auth/email-code?email=&scene=` 时必须传对：注册用 `REGISTER`、换绑邮箱用 `BIND_EMAIL`、找回密码用 `RESET_PASSWORD`（`api/auth.js` 的 `sendEmailCode(email, scene='REGISTER')` 默认值是 REGISTER，换绑场景必须显式传）。
+→ 失败计数与 30 分钟锁定仍按**邮箱**维度（不按 scene 拆），所以换场景取码不会重置额度。
+
 ---
 
 # 编码约定

@@ -680,5 +680,68 @@ d	prod 全配好 → 正常启动（18081）；/doc.html、/v3/api-docs、/swagg
 	· .env* 仍未加入 .gitignore（Minor 20 的残留部分，仓库当前无该文件），列入下一批建议
 
 
+===============================================================
+6.0.6 收尾批测试结果（Minor 1~9 快修 + .env* 忽略 + api-tests 新用例真机跑）
+===============================================================
+测试时间	2026-09-19 17:11 ~ 17:32
+测试范围	① .gitignore 忽略 .env*（保留 .env.example）；② Minor 1~9 快修（库存/订单状态集合、
+		超时阈值分档、数量上限、日志清洗、验证码 scene 隔离、密码序列化锁定、图片地址白名单、
+		回调去重键写时机）；③ api-tests.http 的 6.18~6.23 与 4.33 真机跑；④ 全量回归
+测试环境	Windows 11 / OpenJDK 21.0.12（javac 直编）/ MySQL 8.0.46 / Redis 5.0.14 / dev profile @18080
+验证方式	后端 253 个单测（javac + JUnit Platform）+ 24 项真机检查（PowerShell 5.1 + Invoke-RestMethod，
+		中文 body 一律 UTF8.GetBytes + charset=utf-8）
+
+一、后端编译与全量单测
+命令	javac -parameters -encoding UTF-8（159 个主源文件）→ 测试类编译 → JUnit Platform Launcher
+结果	**253 / 253 通过**（本批前 222，本批 +31：ProductLifecycleMinorTest 5 + OrderMapperMinorSqlTest 4 +
+	OrderCreateQuantityValidationTest 6 + LogSanitizerTest 6 + EmailCodeSceneIsolationTest 6 +
+	UserPasswordSerializationTest 2 + PayCallbackVerificationTest 新增 2）
+说明	新增用例都是"守约定"型：状态集合用「捕获 MyBatis-Plus Wrapper 的参数值」断言（需先调 getSqlSegment()
+	触发懒格式化，否则 paramNameValuePairs 是空 Map —— 实测踩过一次），SQL 文本用注解反射断言
+
+二、真机检查（24 项全 PASS，脚本 target/batch-6.0.2/scenario-606.ps1）
+	6.18	概览 8 个字段齐全（userTotal=44 / gmvTotal=1606.00）
+	6.19	订单状态分布恒定 8 条且含 status/count
+	6.20	分类分布为数组且含 count（7 条）
+	6.21a/b	趋势 days=7 四条序列长度均为 7；days=15 → code=100「days 仅支持 7 或 30」
+	6.22a/b	热门榜 days=30&limit=5 → items=5；limit=21 → code=100「limit 仅支持 1~20」
+	6.23	普通用户访问 /admin/stats/overview → HTTP 200 + code=403
+	4.33b/d/e/f	面交下单（trade_type=1）→ 买家调用 finish-face-seller 得 203 → 卖家确认 1→3 →
+			重复确认 200「请勿重复操作」
+	★Minor 2	构造 status=7（买家申请退款→卖家拒绝）→ 管理员封禁买家 → 订单被冻结为 **5**
+			（修前 7 不在冻结集合里，封禁对它完全无效）
+	★Minor 3a/b/c	邮寄单（trade_type=2）创建 20 分钟 → 被自动取消（4）；
+			面交单（trade_type=1）创建 20 分钟 → **仍为 0**（不被取消）；
+			同一面交单拨到 3 小时前 → 下一轮被取消（4）
+	★Minor 9a/b/c/d	错签名回调 → code=100 且未占用去重键；合法回调 → data=true、订单 0→1、
+			去重键已落盘；同一笔流水重复回调 → data=false；去重键 TTL≈7 天（604797 秒）
+
+三、前端（本批未改前端代码，跑一遍确认无回归）
+命令	npx vitest run
+结果	18 个文件 / 187 个用例全绿
+
+四、本批踩到的三个环境坑（都会让验证结果失真，记下来避免重犯）
+	坑①	**上一批的 app 实例没退出**：PID 12764 仍在 8080 上跑着**旧代码**，它持有 ShedLock 全局锁
+		（导致新实例的超时任务每分钟只抢锁、不执行），并**按旧的 15 分钟规则**取消了本批的面交测试单 ——
+		第一次真机跑因此出现"面交 20 分钟也被取消"的假失败（app 日志里查不到 cancelByTimeout 执行记录，
+		这就是线索：取消不是被观察的实例做的）。终止陈旧实例并释放 shedlock 行后重跑即全部通过。
+		教训：真机验证前先确认"同一 DB 上只有一个调度实例"，`netstat` 查端口 + 查 `shedlock` 的 locked_by。
+	坑②	**PowerShell 变量名大小写不敏感**：脚本里 `$PASS`（口令）与计数器 `$script:pass` 是**同一个变量**，
+		`$script:pass = 0` 把口令清成了 `0`，注册直接返回 100「密码长度必须为8-20位」。计数器改名后正常。
+	坑③	我自己的脚本把响应字段写错了两处：下单返回体是 `data.orderId`（不是 `data.id`）、
+		拒绝退款请求体是 `rejectReason`（不是 `reason`，写错会被 @NotBlank 拦成 100）。两处都只影响脚本，
+		但会让用例"看似通过/看似失败" —— 断言应尽量落到 SQL 的实际状态（本批最终就是这么改的）。
+
+五、没能验证的部分
+	· Minor 9 的**事务回滚**分支：真机上难以稳定制造"状态机执行后回滚"，只在单测里覆盖
+	  （`PayCallbackVerificationTest ⑦`：pay 抛异常 → 去重键绝不落键）；真机只验证了
+	  "验签失败不占键 / 成功才落键 / 重复回调被去重 / TTL 正确"
+	· 面交 120 分钟窗口只验证了"20 分钟不取消、3 小时取消"两个点，**没有**精确验证 119/121 分钟的边界
+	· 前端待支付倒计时仍写死 15 分钟（后端面交已是 120 分钟），属**已知不一致**，本批未改前端，
+	  已列入下一批建议与 PROJECT_CONTEXT 3.9.9
+	· 真机脚本创建的测试账号/商品/订单留在 dev 库里（与既有 api-tests 跑法一致，未做数据清理）
+
+
+
 
 

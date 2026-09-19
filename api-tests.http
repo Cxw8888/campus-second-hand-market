@@ -1951,13 +1951,20 @@ Content-Type: application/json
 }
 
 > {%
-    client.global.set("o10", response.body.data ? response.body.data.id : "");
+    client.global.set("o10", response.body.data ? response.body.data.orderId : "");
     client.test("4.33b 面交下单成功（status=0）", function () {
         client.assert(response.body.code === 200, "code 应为 200，实际 " + response.body.code + " / " + response.body.msg);
+        // ⚠️ 下单返回体 OrderCreateVO 只有 {orderId, orderNo, amount, status}：
+        //    没有 id、也没有 tradeType（6.0.6 真机跑时踩到：原来断言 data.tradeType === 1 必失败）。
+        //    trade_type 是订单快照字段，要核对请查库（见下方 NOTE）。
+        client.assert(!!response.body.data.orderId, "应返回 orderId，实际 " + JSON.stringify(response.body.data));
         client.assert(response.body.data.status === 0, "status 应为 0，实际 " + response.body.data.status);
-        client.assert(response.body.data.tradeType === 1, "tradeType 应为 1（仅面交），实际 " + response.body.data.tradeType);
     });
 %}
+
+# NOTE（trade_type=1 的核对方式）：接口不返回 trade_type，真机验证时用 SQL 核对 ——
+#   SELECT trade_type FROM tb_order WHERE id = {{o10}};   -- 期望 1（面交）
+# 6.0.6 实测结论：下单快照取的是商品维度的 trade_type，p_fs 的 tradeType=1 → 订单 trade_type=1。
 
 
 ### 4.33c 买家支付 o10（0→1）

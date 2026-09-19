@@ -1,4 +1,5 @@
-校园二手交易平台 - 项目需求与设计文档 (AI Context 正式封版 V32)
+校园二手交易平台 - 项目需求与设计文档 (AI Context 正式封版 V33)
+V33 核心变更：Minor 1~9 收尾（批次 6.0.6）——未完成订单集合补「5-冻结」、封禁冻结集合补「7-退款被拒」、待支付超时取消按交易方式分档（邮寄 15 分钟 / 面交 120 分钟，均可配置）、下单 `quantity` 上限 100、日志 CR/LF 清洗、验证码 Key 按 scene 隔离（`email:code:{scene}:{email}`）、商品图片地址协议/前缀白名单、支付回调去重键改到事务提交后写；新增 3.9.9「Minor 收尾约定」。技术设计不变，仅追加实现约定与踩坑记录。
 V32 核心变更：新增 3.9.7「上传配额与文件清理约定」（先读图片头再解码、按用户双阈值配额、删商品/换图/换头像清理文件）、3.9.8「定时任务约定」（阈值接线、lock-at-most-for 接线、提醒去重+窗口、逐单独立事务）；订单状态机补「已支付面交单超期自动完成」兜底路径。技术设计不变，仅追加实现约定与踩坑记录。
 V31 核心变更：补「卖家确认面交完成（已支付面交单 1→3）」路径（订单状态机 + 接口清单 + 前端按钮），补「售罄商品编辑」审核规则（关键字段变更必须重审）；3.9.6 记录 PowerShell 请求体编码踩坑（验证脚本专用）。技术设计不变，仅追加实现约定与踩坑记录。
 V30 核心变更：新增 3.9.4「事务边界与异步通知约定」（`TransactionHelper.runAfterCommit` 范式、`NotificationDispatcher` 独立 Bean 的原因、CallerRunsPolicy 的 sleep 为何不再持有行锁）、3.9.5「用户封禁缓存约定」（写完移到提交后、TTL 1 天、拦截器"缓存说封禁时以库为准"）。技术设计不变，仅追加实现约定与踩坑记录。
@@ -991,6 +992,31 @@ Invoke-RestMethod -Uri $url -Method $method -Headers $headers `
 在事务里 UPDATE 那把锁更糟（ShedLock 的独立事务会等行锁 50 秒）。
 → 集成测试统一用 `AopTestUtils.getTargetObject(scheduledTasks)` 绕过代理直接调任务体；
 加锁行为由 `ScheduledLockConfigurationWiringTest` 单独验证。
+
+### 3.9.9 Minor 收尾约定（6.0.6 · 自审 Minor 1~9）
+
+> 这一批全部来自自审报告的 Minor 清单，没有新功能；逐条的"修前症状 → 现在的约定"如下。
+> 状态集合与阈值一律走**常量 / 配置**，`OrderMapperMinorSqlTest` 用注解文本 + 编排层传参两层断言守住。
+
+| # | 约定 | 修前症状 |
+| :--- | :--- | :--- |
+| 1 | **未完成订单集合含 5-冻结**：`ProductServiceImpl.UNFINISHED_ORDER_STATUS` = {0,1,2,6,7,**5**}，命中即拒绝删除（207） | 冻结订单的商品可被删除；之后解冻 CANCEL 回补时 `is_deleted=0` 命中 0 行 → 库存静默丢失 |
+| 2 | **封禁冻结集合含 7-退款被拒**：`OrderMapper.freezeByUser` 的 `status IN (0,1,2,6,**7**)` | 被封禁用户"退款被拒"的单不冻结，3 天后自动恢复 1/2 继续流转，封禁形同虚设 |
+| 3 | **待支付超时按交易方式分档**：邮寄（`trade_type IN (2,3)`）`app.task.timeout-cancel.minutes` 默认 15 分钟；面交（`trade_type=1`）`face-minutes` 默认 120 分钟。取数 SQL 用一条 `OR` 查询 + 统一 `LIMIT`（避免宽窗口挤占邮寄单名额） | 两者共用 15 分钟：面交是"约时间见面"，买家还在路上订单就被系统取消 |
+| 4 | **下单数量有上限**：`OrderCreateRequest.quantity` = `@NotNull` + `@Min(1)` + `@Max(100)` | 只有 `@Min(1)`；`quantity=999999` 白耗一次库存行锁，且报错语义是 201 而不是参数错误 |
+| 5 | **外部输入进日志前清洗**：`LogSanitizer.sanitize()`（控制字符 → `_`，默认截断 200 字符；`X-Request-Id` 上限 64）用于搜索关键字日志、熔断/超时日志与 `RequestIdFilter` | `X-Request-Id` 与 `?keyword=` 带 `\r\n` 就能在日志里伪造日志行；响应头还会原样回显 |
+| 6 | **验证码按 scene 隔离**：Key = `email:code:{scene}:{email}`，scene 归一化（大写 + 去空白，空值 → `VERIFY`）；`verify(email, scene, code)` 的 scene 必须与取码一致，否则 103。**失败计量与锁定仍按邮箱维度**（`email:fail` / `email:lock` 不带 scene，否则换场景等于多拿额度） | Key 无 scene：注册场景取到的码可直接用于找回密码 / 换绑邮箱 |
+| 7 | **`User.password` 永不进 JSON**：`@JsonProperty(access = WRITE_ONLY)`（`UserPasswordSerializationTest` 守住"别顺手删掉这行"） | 靠"没人直接返回 User 实体"来保证，属隐患 |
+| 8 | **图片地址白名单**：只接受站内前缀（`app.storage.local.url-prefix`，默认 `/static/uploads`，**从配置读**）或 `http(s)://`（`regionMatches` 判断，避免 `httpx://` 误判）；`javascript:` / `data:` / `file:` / 协议相对的 `//host` 一律 100 | 任意字符串都能进库并原样渲染到 `<img src>`：外链追踪像素、以图引流 |
+| 9 | **支付回调去重键在提交后写**：读侧 `hasKey` 在事务内判定（快路径），写侧 `set` 走 `TransactionHelper.runAfterCommit`；并发穿透由状态机 `WHERE status = 0` 兜底 | 事务内 `SETNX` + 事务回滚 → 键已占位而状态没变，支付方按幂等重试同一笔流水会被当成"重复回调"直接吞掉（**支付永久丢失且不报错**） |
+
+⚠️ **一处已知的前后端不一致（列入下一批）**：Minor 3 之后面交单的实际支付窗口是 120 分钟，
+但前端 `OrderSuccessView` / `OrderCreateView` / `utils/constants.js` 仍写死"15 分钟"，
+`PayCountdown` 也会在 15 分钟时 emit `expire` 并提示"已被系统自动取消"（后端此时并未取消）。
+**倒计时与文案必须按订单 `tradeType` 取 15 / 120 分钟**，本批为控制范围未改前端。
+
+⚠️ **Redis Key 变更的兼容性**：`email:code:` 由无 scene 变为带 scene，旧 Key 最多 5 分钟后自然过期，
+不需要迁移脚本；但**部署后到旧 Key 过期之间，用旧格式取到的码不能再用**（属预期行为）。
 
 4. AI 扩展预留 (RAG 智能导购)
 MVP 阶段：关键词检索用 MySQL LIKE，必须匹配 title 或 description。必须参数化 CONCAT('%', #{keyword}, '%')，严禁拼接。
