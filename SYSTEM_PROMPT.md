@@ -142,9 +142,12 @@ src/
 prod 下 `SecurityHeadersFilter` 下发 `Content-Security-Policy: default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; object-src 'none'; frame-ancestors 'none'; base-uri 'self'`，另有 `X-Frame-Options: DENY`、`X-Content-Type-Options: nosniff`、`Referrer-Policy: strict-origin-when-cross-origin`（dev 不下发 CSP，否则 knife4j 打不开）。
 → 前端因此**不能**引用外部 CDN 的字体/脚本/图片，也**不能**直连第三方接口（`connect-src 'self'`，所有请求都要走 `/api` 代理或同源后端）；图片只允许同源与 `data:`（Element Plus 的 data URI 图标因此可用）。改这些约定等于改生产可用性，属于架构级决策，必须先问用户。
 
-## 15. 待支付超时窗口**按交易方式分档**（6.0.6 · Minor 3）
+## 15. 待支付超时窗口**按交易方式分档**（6.0.6 · Minor 3；前端 6.0.7 同步）
 `app.task.timeout-cancel.minutes`（邮寄 `trade_type IN (2,3)`，默认 15 分钟）/ `face-minutes`（面交 `trade_type = 1`，默认 **120 分钟**）；定时任务每 1 分钟扫描一次，取消时回补库存并通知双方。
-→ **前端待支付文案与倒计时必须按订单 `tradeType` 取值**。当前 `OrderSuccessView` / `OrderCreateView` / `constants.js` 仍写死"15 分钟"，`PayCountdown` 会在 15 分钟 emit `expire` 并提示"已被系统自动取消"——**而后端此时并没有取消面交单**（已列入下一批待办，改前不要依赖这段文案做状态判断）。
+→ **前端已按 `tradeType` 分档（6.0.7）**：`utils/constants.js` 的 `payTimeoutMinutes(tradeType)`（1→120，2/3→15，未知→15 兜底）
+与 `payTimeoutHint(tradeType)` / `payTimeoutExpiredHint(tradeType)`；`PayCountdown` 用 `tradeType` prop 取窗口
+（优先级：显式 `minutes` > `tradeType` > 邮寄默认 15）；订单成功页 / 订单详情页 / 订单卡片 / 下单成功提示全部跟随。
+**禁止**在页面里再写死 `15 * 60` 或"15 分钟"字面量 —— 新页面接入时统一走 `payTimeoutMinutes()`。
 → 判断"是否真的超时"只信后端返回的 `status`，不要用前端倒计时推算。
 
 ## 16. 邮箱验证码按 scene 隔离（6.0.6 · Minor 6）

@@ -1,4 +1,4 @@
-# 校园二手交易平台（V33 对齐）
+# 校园二手交易平台（V34 对齐）
 
 Java 21 + Spring Boot 3 + MyBatis-Plus + MySQL 8.0 + Redis + Flyway + ShedLock 的后端，
 Vue 3 + Vite + Element Plus 的前端。统一包名 `com.campus.market`，接口统一前缀 `/api/v1/`。
@@ -11,7 +11,7 @@ Vue 3 + Vite + Element Plus 的前端。统一包名 `com.campus.market`，接�
 | 后端 | Java 21、Spring Boot 3.2.5、MyBatis-Plus 3.5.5、MySQL 8.0、Redis、Flyway 10、ShedLock 5.10、jjwt 0.12.5、knife4j 4.4 + springdoc 2.3 |
 | 前端 | Vue 3（`<script setup>`）、Pinia、Vue Router 4、Element Plus 2.14、ECharts 6.1、Vite 5.4、Vitest + @vue/test-utils |
 
-> 版本号 `V33` 指 `PROJECT_CONTEXT.md` 头部变更记录中的当前版本（V33 = 自审 Minor 1~9 收尾；V32 = 上传加固 + 定时任务加固 + 前端缩略图）。
+> 版本号 `V34` 指 `PROJECT_CONTEXT.md` 头部变更记录中的当前版本（V34 = 前端倒计时按 trade_type 分档；V33 = 自审 Minor 1~9 收尾；V32 = 上传加固 + 定时任务加固 + 前端缩略图）。
 > 各文档的版本对齐口径见「六、文档索引与同步约定」。
 
 ---
@@ -35,7 +35,7 @@ Vue 3 + Vite + Element Plus 的前端。统一包名 `com.campus.market`，接�
 | 配置类（MyBatis-Plus / Jackson / CORS / 线程池 / ShedLock / 安全 / 静态资源） | `src/main/java/com/campus/market/config/` |
 | 后端单元测试（48 个测试类、253 个用例） | `src/test/java/` |
 | 前端工程（17 个视图、27 条路由、9 个 api 模块、25 个组件） | `frontend/` |
-| 前端单元测试（18 个测试文件、187 个用例） | `frontend/src/**/__tests__/` |
+| 前端单元测试（21 个测试文件、220 个用例） | `frontend/src/**/__tests__/` |
 | 前端构建门禁（样式隔离 / 分包断言） | `frontend/scripts/verify-styles.mjs`、`verify-chunks.mjs` |
 | 手工联调脚本（HTTP 用例集） | `api-tests.http` |
 | 每批交付模板 | `BATCH_TEMPLATE.md` |
@@ -231,6 +231,9 @@ prod 还多两道启动断言（fail-fast，见 `EmailCodeServiceImpl#assertSkip
 - **日期控件**：统一 `el-date-picker` / `el-date-editor` 系列，避免样式与交互不一致。
 - **图片降级**：`ProductImage` 提供 `fallbackSrc`，列表卡片优先用 `thumbUrl`，避免首屏拉全尺寸大图。
 - **错误提示**：`utils/request.js` 的 `baseURL` 为相对路径 `/api/v1`（由 Vite 代理转发），连接失败提示按 dev / 生产区分文案，不在生产提示本地开发地址。
+- **待支付窗口**：窗口分钟数只来自 `constants.js` 的 `payTimeoutMinutes(tradeType)`（面交 120 / 邮寄·皆可 15，与后端
+  `app.task.timeout-cancel.*` 对应），`PayCountdown` 通过 `tradeType` prop 取窗口；页面上**不允许**再写 "15 分钟" 这类字面量，
+  是否真的超时一律以后端返回的 `status` 为准（前端只是展示镜像）。
 
 ---
 
@@ -300,8 +303,8 @@ prod 还多两道启动断言（fail-fast，见 `EmailCodeServiceImpl#assertSkip
 - [x] 自审报告 Minor 1–9 的收尾（批次 6.0.6：未完成订单集合补 5-冻结、封禁冻结集合补 7-退款被拒、
       待支付超时按交易方式分档 15/120 分钟、`quantity` 补 `@Max(100)`、日志 CR/LF 清洗、
       验证码按 scene 隔离、`User.password` 序列化回归锁定、图片 URL 协议白名单、支付回调去重键改到提交后写）
-- [ ] **前端待支付倒计时/文案按 `tradeType` 取 15 或 120 分钟**（后端面交已放宽到 120 分钟，
-      前端仍写死 15 分钟并在 15 分钟提示"已被自动取消"——已知不一致，见 PROJECT_CONTEXT 3.9.9）
+- [x] **前端待支付倒计时/文案按 `tradeType` 取 15 或 120 分钟**（批次 6.0.7：`payTimeoutMinutes()` +
+      `PayCountdown` 的 `tradeType` prop，订单成功页/详情页/订单卡片/下单提示全部跟随）
 - [ ] 自审报告剩余 Minor：`trade_type=3` 订单走不了面交终态（下单页选择未传后端）、
       `resolveStatus` 非售罄分支不看新库存、并发下幂等码不稳定、防重 Token 无 Redis 降级、
       管理端订单无关键字检索/用户无 role 筛选

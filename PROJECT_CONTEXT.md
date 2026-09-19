@@ -1,4 +1,5 @@
-校园二手交易平台 - 项目需求与设计文档 (AI Context 正式封版 V33)
+校园二手交易平台 - 项目需求与设计文档 (AI Context 正式封版 V34)
+V34 核心变更：前端倒计时按 trade_type 分档（批次 6.0.7）—— 补上 6.0.6 · Minor 3 遗留的前后端不一致：`constants.js` 新增 `PAY_TIMEOUT_MAIL_MINUTES(15) / PAY_TIMEOUT_FACE_MINUTES(120)` 与 `payTimeoutMinutes(tradeType)`，`PayCountdown` 新增 `tradeType` prop，订单成功页 / 订单详情页 / 订单卡片 / 下单成功提示全部按订单 `trade_type` 取窗口；`ORDER_STATUS_MAP[0].actionHint` 去掉写死的分钟数改为通用文案（具体分钟数由 `orderStatusHint(status, tradeType)` 计算）。技术设计不变，仅追加实现约定与踩坑记录。
 V33 核心变更：Minor 1~9 收尾（批次 6.0.6）——未完成订单集合补「5-冻结」、封禁冻结集合补「7-退款被拒」、待支付超时取消按交易方式分档（邮寄 15 分钟 / 面交 120 分钟，均可配置）、下单 `quantity` 上限 100、日志 CR/LF 清洗、验证码 Key 按 scene 隔离（`email:code:{scene}:{email}`）、商品图片地址协议/前缀白名单、支付回调去重键改到事务提交后写；新增 3.9.9「Minor 收尾约定」。技术设计不变，仅追加实现约定与踩坑记录。
 V32 核心变更：新增 3.9.7「上传配额与文件清理约定」（先读图片头再解码、按用户双阈值配额、删商品/换图/换头像清理文件）、3.9.8「定时任务约定」（阈值接线、lock-at-most-for 接线、提醒去重+窗口、逐单独立事务）；订单状态机补「已支付面交单超期自动完成」兜底路径。技术设计不变，仅追加实现约定与踩坑记录。
 V31 核心变更：补「卖家确认面交完成（已支付面交单 1→3）」路径（订单状态机 + 接口清单 + 前端按钮），补「售罄商品编辑」审核规则（关键字段变更必须重审）；3.9.6 记录 PowerShell 请求体编码踩坑（验证脚本专用）。技术设计不变，仅追加实现约定与踩坑记录。
@@ -1010,10 +1011,17 @@ Invoke-RestMethod -Uri $url -Method $method -Headers $headers `
 | 8 | **图片地址白名单**：只接受站内前缀（`app.storage.local.url-prefix`，默认 `/static/uploads`，**从配置读**）或 `http(s)://`（`regionMatches` 判断，避免 `httpx://` 误判）；`javascript:` / `data:` / `file:` / 协议相对的 `//host` 一律 100 | 任意字符串都能进库并原样渲染到 `<img src>`：外链追踪像素、以图引流 |
 | 9 | **支付回调去重键在提交后写**：读侧 `hasKey` 在事务内判定（快路径），写侧 `set` 走 `TransactionHelper.runAfterCommit`；并发穿透由状态机 `WHERE status = 0` 兜底 | 事务内 `SETNX` + 事务回滚 → 键已占位而状态没变，支付方按幂等重试同一笔流水会被当成"重复回调"直接吞掉（**支付永久丢失且不报错**） |
 
-⚠️ **一处已知的前后端不一致（列入下一批）**：Minor 3 之后面交单的实际支付窗口是 120 分钟，
-但前端 `OrderSuccessView` / `OrderCreateView` / `utils/constants.js` 仍写死"15 分钟"，
-`PayCountdown` 也会在 15 分钟时 emit `expire` 并提示"已被系统自动取消"（后端此时并未取消）。
-**倒计时与文案必须按订单 `tradeType` 取 15 / 120 分钟**，本批为控制范围未改前端。
+⚠️ **前端倒计时已同步（6.0.7）**：Minor 3 之后面交单的实际支付窗口是 120 分钟，
+前端 `OrderSuccessView` / `OrderDetailView` / `OrderCard` / `OrderCreateView` 原先写死"15 分钟"，
+`PayCountdown` 也会在第 15 分钟 emit `expire` 并提示"已被系统自动取消"（后端此时并未取消）。
+6.0.7 已修：`constants.js` 提供 `PAY_TIMEOUT_MAIL_MINUTES(15) / PAY_TIMEOUT_FACE_MINUTES(120)` 与
+`payTimeoutMinutes(tradeType)`，`PayCountdown` 新增 `tradeType` prop（优先级：显式 `minutes` > `tradeType` 分档 > 邮寄默认 15），
+四处文案与倒计时统一按**订单快照的 `trade_type`** 取值；`ORDER_STATUS_MAP[0].actionHint` 改为不含分钟数的通用文案，
+具体分钟数由 `orderStatusHint(status, tradeType)` 计算（字典里写死必然有一边是错的）。
+
+> 前端侧约定（6.0.7 · 3.9.10）：**窗口分钟数只允许来自 `payTimeoutMinutes()`**，
+> 任何页面都不许再写 `15 * 60` / "15 分钟" 这类字面量；待支付窗口的"真相"在后端（`app.task.timeout-cancel.*`），
+> 前端只是展示镜像，**判断是否真的超时一律以后端返回的 `status` 为准**，不用倒计时推算。
 
 ⚠️ **Redis Key 变更的兼容性**：`email:code:` 由无 scene 变为带 scene，旧 Key 最多 5 分钟后自然过期，
 不需要迁移脚本；但**部署后到旧 Key 过期之间，用旧格式取到的码不能再用**（属预期行为）。

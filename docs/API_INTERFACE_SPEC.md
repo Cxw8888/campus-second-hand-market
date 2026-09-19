@@ -122,8 +122,12 @@
 > （`@SchedulerLock` 名 `cancelTimeoutOrderTask`），阈值取自 `app.task.timeout-cancel`：
 > **邮寄单（`trade_type IN (2,3)`）默认 15 分钟**（`minutes`）、**面交单（`trade_type = 1`）默认 120 分钟**（`face-minutes`）。
 > 取消时同步**回补库存**并通知买卖双方。修前两者共用 15 分钟，面交单（约时间见面）常在买家赶路途中被系统取消。
-> ⚠️ **前端文案/倒计时尚未跟随**（`OrderSuccessView` / `OrderCreateView` / `constants.js` 仍写死"15 分钟"），
-> 列为下一批待办：倒计时应按订单 `tradeType` 取 15 分钟或 120 分钟。
+>
+> **前端已按 `trade_type` 分档（批次 6.0.7）**：`utils/constants.js` 的 `payTimeoutMinutes(tradeType)` 给出窗口分钟数
+> （1 → 120，2/3 → 15，未知 → 15 兜底），`PayCountdown` 通过 `tradeType` prop 取窗口，
+> 订单成功页 / 订单详情页 / 订单卡片 / 下单成功提示的文案与倒计时全部跟随；
+> **订单快照的 `trade_type` 由 `GET /order/detail/{id}`（`OrderVO.tradeType`）提供，不需要额外请求**。
+> 前端只是展示镜像，是否真的超时一律以后端返回的 `status` 为准。
 
 ## 5. 收藏 `/api/v1/favorite`
 
