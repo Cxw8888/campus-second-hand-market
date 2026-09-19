@@ -155,6 +155,18 @@ Redis Key = `email:code:{SCENE}:{email}`，scene 归一化（大写 + 去空白�
 → 前端调 `/auth/email-code?email=&scene=` 时必须传对：注册用 `REGISTER`、换绑邮箱用 `BIND_EMAIL`、找回密码用 `RESET_PASSWORD`（`api/auth.js` 的 `sendEmailCode(email, scene='REGISTER')` 默认值是 REGISTER，换绑场景必须显式传）。
 → 失败计数与 30 分钟锁定仍按**邮箱**维度（不按 scene 拆），所以换场景取码不会重置额度。
 
+## 17. 支付回调签名**必须覆盖金额**（V35 · S3 遗留批）
+`payload = orderNo|tradeNo|amount|timestamp`，其中 `amount` 固定 2 位小数
+（服务端 `setScale(2, HALF_UP).toPlainString()`，如 `"45.00"`）；服务端还会用 `BigDecimal.compareTo`
+把 `amount` 与 `tb_order.amount`（`DECIMAL(10,2)`）比对。
+→ **算签名方必须先 `toFixed(2)` 再拼 payload**（不能把原始金额字符串直接拼进去），否则两端 payload 不一致、必然验签失败；
+`{"amount":45}` 在服务端会归一成 `"45.00"`，所以调用方按 `"45.00"` 签是对的。
+→ 对外失败文案**只有一句**：`code=100「回调签名校验失败」`（签名错 / 时间戳过期 / 订单不存在 / **金额不匹配** 都一样），
+真实原因与期望/实际金额**只进服务端日志**；订单状态不允许是 `209`；已支付且金额一致是 `200 + data=false`。
+→ 这类"对外统一文案"的接口**禁止**在 msg 里加区分性信息（否则等于给攻击者做 orderNo / 金额探测器）；
+参数层失败（amount 缺失/越界）是例外：那是**请求格式**问题，返回字段文案。
+→ 旧的**三段** payload（无 amount）已废弃、不再兼容。
+
 ---
 
 # 编码约定
@@ -328,7 +340,7 @@ flag，裸 javac 不带。
 | 每批结束（无论改了什么） | `PROJECT_CONTEXT.md` 头部 + `系统测试.txt` + `docs/自审报告-2026-09-19.md` | ① 头部追加本版变更行；② `系统测试.txt` **只追加**一段本批真机验证记录（不改历史段落）；③ 自审报告里已修条目统一改成 `已修复（批次号）`，未修的保持原状 |
 | 报告骨架需要调整 | `BATCH_TEMPLATE.md` | 仅当六节结构本身变化时改，否则「无需修改」 |
 
-**版本号口径**：`PROJECT_CONTEXT.md` 头部的最新版本号 = 项目当前版本（如 V34），
+**版本号口径**：`PROJECT_CONTEXT.md` 头部的最新版本号 = 项目当前版本（如 V35），
 `README.md` 标题与 `docs/API_INTERFACE_SPEC.md` 标题必须与之一致；改版本时三处一起改。
 
 ---

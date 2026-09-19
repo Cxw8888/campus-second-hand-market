@@ -1,6 +1,6 @@
 ###############################################################################
 #  校园二手交易平台 · 端到端验收脚本
-#  对应 PROJECT_CONTEXT.md (V34) 第 6 章「验收标准与关键接口测试用例」
+#  对应 PROJECT_CONTEXT.md (V35) 第 6 章「验收标准与关键接口测试用例」
 #
 #  文件位置：项目根目录  C:\Users\chen\Desktop\rwuru\api-tests.http
 #  IDEA 中打开：双击文件 → 右上角选择运行环境 → 逐条点请求左侧的 ▶
@@ -25,11 +25,16 @@
 #              导致 LIKE 条件整段跳过、返回全部上架商品）；3.20b 用负向对照锁死该行为。
 #       3.15   编辑重审：1-上架中 改关键字段 → 必须回到 3-待审核（3.15e），
 #              只改非关键字段 → 必须保持 1（3.15h）。此前用例编辑的是本就处于 3 的商品，等于没测。
-#  9. 【6.0.2 起支付回调必须签名】/order/pay/callback 现在校验 HMAC-SHA256 签名，
-#     无签名 / 错签名 / 时间戳超出 5 分钟窗口一律返回 code=100「回调签名校验失败」。
-#     签名算法：sign = HMAC-SHA256(orderNo + "|" + tradeNo + "|" + timestamp, PAY_CALLBACK_SECRET)
-#              （十六进制小写；timestamp 为毫秒）
-#     ⚠️ 跑 §4.28c / §4.28d 之前，后端必须以同一个密钥启动，例如：
+#  9. 【支付回调必须签名，且签名覆盖金额】/order/pay/callback 校验 HMAC-SHA256 签名，
+#     无签名 / 错签名 / 时间戳超出 5 分钟窗口 / 订单不存在 / **金额与订单不一致**
+#     一律返回 code=100「回调签名校验失败」（对外不区分真实原因，防 orderNo 探测器）。
+#     签名算法（S3 遗留批起为**四段**，amount 固定 2 位小数）：
+#        payload = orderNo + "|" + tradeNo + "|" + amount(2 位小数) + "|" + timestamp(毫秒)
+#        sign    = HMAC-SHA256(payload, PAY_CALLBACK_SECRET)（十六进制小写）
+#     ⚠️ amount 必须先格式化成 2 位小数字符串再算签名（"45.00"，不是 "45" 或 "45.0"）：
+#        服务端会用 setScale(2, HALF_UP).toPlainString() 归一后再比对，两端格式不一致必然验签失败。
+#     ⚠️ 旧的三段 payload（V34 及之前，无 amount）自本批起**不再兼容**。
+#     ⚠️ 跑 §4.28c / §4.28d / §4.28e 之前，后端必须以同一个密钥启动，例如：
 #          $env:PAY_CALLBACK_SECRET = "dev-pay-callback-secret-0123456789-abcdefgh"
 #        （密钥在 0.0 里写入 {{pay_callback_secret}}，两处必须一致；不注入密钥时回调一律被拒绝）
 ###############################################################################
@@ -1784,14 +1789,16 @@ Content-Type: application/json
 %}
 
 ### 4.28c 支付回调幂等（第3步：首次回调 → 期望 data=true）
-# 【6.0.2 起必须签名】下面的预请求脚本用 IDEA HTTP Client 的 crypto API 现算签名：
-#   payload = orderNo|tradeNo|timestamp（毫秒）
+# 【必须签名，且签名覆盖金额】下面的预请求脚本用 IDEA HTTP Client 的 crypto API 现算签名：
+#   payload = orderNo|tradeNo|amount(2 位小数)|timestamp（毫秒）
 #   sign    = HMAC-SHA256(payload, PAY_CALLBACK_SECRET) 十六进制小写
+# ⚠️ amount 先 toFixed(2) 再拼 payload（"45.00"）—— 服务端也是这么归一的，两端必须一致。
 # 脚本里的密钥取自 {{pay_callback_secret}}（见 0.0 与文件头注意事项 9），必须与后端一致。
 > {%
     const tradeNo = "TRADE-ACCEPT-001";
     const ts = Date.now();
-    const payload = client.global.get("o7_no") + "|" + tradeNo + "|" + ts;
+    const amountStr = Number(45.00).toFixed(2);   // "45.00"
+    const payload = client.global.get("o7_no") + "|" + tradeNo + "|" + amountStr + "|" + ts;
     const sign = crypto.hmac.sha256()
         .withTextSecret(client.global.get("pay_callback_secret"))
         .updateWithText(payload)
@@ -1799,7 +1806,9 @@ Content-Type: application/json
         .toHex()
         .toLowerCase();
     client.global.set("cb_ts", ts);
+    client.global.set("cb_amount", amountStr);
     client.global.set("cb_sign", sign);
+    client.global.set("cb_trade_no", tradeNo);
 %}
 POST {{base}}/order/pay/callback
 Content-Type: application/json
@@ -1807,6 +1816,7 @@ Content-Type: application/json
 {
   "orderNo": "{{o7_no}}",
   "tradeNo": "TRADE-ACCEPT-001",
+  "amount": {{cb_amount}},
   "timestamp": {{cb_ts}},
   "sign": "{{cb_sign}}"
 }
@@ -1819,7 +1829,7 @@ Content-Type: application/json
 %}
 
 ### 4.28d 支付回调幂等（第4步：重复回调 → 期望 data=false）
-# 刻意【不重新签名】：复用 4.28c 的 timestamp 与 sign，构成"同一笔回调被重放"的真实场景
+# 刻意【不重新签名】：复用 4.28c 的 timestamp / amount / sign，构成"同一笔回调被重放"的真实场景
 #（验签通过 → 命中 Redis 去重键 pay:callback:{orderNo}:{tradeNo} → data=false）。
 POST {{base}}/order/pay/callback
 Content-Type: application/json
@@ -1827,6 +1837,7 @@ Content-Type: application/json
 {
   "orderNo": "{{o7_no}}",
   "tradeNo": "TRADE-ACCEPT-001",
+  "amount": {{cb_amount}},
   "timestamp": {{cb_ts}},
   "sign": "{{cb_sign}}"
 }
@@ -1835,6 +1846,43 @@ Content-Type: application/json
     client.test("4.28b 重复支付回调 → data=false（幂等去重）", function () {
         client.assert(response.body.code === 200, "code 应为 200，实际 " + response.body.code + " / " + response.body.msg);
         client.assert(response.body.data === false, "重复回调 data 应为 false，实际 " + response.body.data);
+    });
+%}
+
+### 4.28e ★金额校验（S3 遗留批）：签名合法但金额与订单不一致 → 期望 code=100
+# 这是本批新增的核心用例：用【正确密钥】对【错误金额 1.00】签名 ——
+# 说明拦下它的必须是"金额与订单比对"，而不是验签（签名本身是合法的）。
+# o7 的订单金额是 45.00（见 4.28b 下单时 quantity=1、单价 45.00）。
+# 另：本用例故意用**新 tradeNo**，避免命中 4.28c 已写下的去重键而提前 return false。
+> {%
+    const tradeNo = "TRADE-WRONG-AMOUNT-001";
+    const ts = Date.now();
+    const amountStr = Number(1.00).toFixed(2);    // "1.00"（与订单 45.00 不一致）
+    const payload = client.global.get("o7_no") + "|" + tradeNo + "|" + amountStr + "|" + ts;
+    const sign = crypto.hmac.sha256()
+        .withTextSecret(client.global.get("pay_callback_secret"))
+        .updateWithText(payload)
+        .digest()
+        .toHex()
+        .toLowerCase();
+    client.global.set("cb_bad_ts", ts);
+    client.global.set("cb_bad_sign", sign);
+%}
+POST {{base}}/order/pay/callback
+Content-Type: application/json
+
+{
+  "orderNo": "{{o7_no}}",
+  "tradeNo": "TRADE-WRONG-AMOUNT-001",
+  "amount": 1.00,
+  "timestamp": {{cb_bad_ts}},
+  "sign": "{{cb_bad_sign}}"
+}
+
+> {%
+    client.test("4.28e 金额与订单不一致 → code=100「回调签名校验失败」（对外不暴露期望金额）", function () {
+        client.assert(response.body.code === 100, "code 应为 100，实际 " + response.body.code + " / " + response.body.msg);
+        client.assert(response.body.msg === "回调签名校验失败", "msg 必须统一，实际 " + response.body.msg);
     });
 %}
 

@@ -1,4 +1,5 @@
-校园二手交易平台 - 项目需求与设计文档 (AI Context 正式封版 V34)
+校园二手交易平台 - 项目需求与设计文档 (AI Context 正式封版 V35)
+V35 核心变更：S3 遗留批 —— 支付回调**金额校验**补齐（自审报告 S3 的最后一块）。签名 payload 由三段 `orderNo|tradeNo|timestamp` 改为四段 `orderNo|tradeNo|amount|timestamp`（amount 固定 2 位小数，`setScale(2, HALF_UP).toPlainString()`），服务端在查订单后用 `BigDecimal.compareTo` 与 `tb_order.amount`（DECIMAL(10,2)）比对；`PayCallbackRequest` 新增 `amount`（`@NotNull` + `@DecimalMin(0.01)` + `@DecimalMax(99999999.99)`）；校验顺序固定为「参数校验 → 验签 → 查订单 → 金额比对 → 去重读侧 → 状态判断」**全部在事务外**，只有状态机在事务内（新增 `PayCallbackProcessor`，独立 Bean 才有事务），去重键在写库提交后落（6.0.6 · Minor 9 的约定保持）；订单状态非 0/1 时由"静默返回 false"改为 **209**；旧三段签名不再兼容。新增 3.9.10「支付回调约定」。技术设计不变，仅追加实现约定与踩坑记录。
 V34 核心变更：前端倒计时按 trade_type 分档（批次 6.0.7）—— 补上 6.0.6 · Minor 3 遗留的前后端不一致：`constants.js` 新增 `PAY_TIMEOUT_MAIL_MINUTES(15) / PAY_TIMEOUT_FACE_MINUTES(120)` 与 `payTimeoutMinutes(tradeType)`，`PayCountdown` 新增 `tradeType` prop，订单成功页 / 订单详情页 / 订单卡片 / 下单成功提示全部按订单 `trade_type` 取窗口；`ORDER_STATUS_MAP[0].actionHint` 去掉写死的分钟数改为通用文案（具体分钟数由 `orderStatusHint(status, tradeType)` 计算）。技术设计不变，仅追加实现约定与踩坑记录。
 V33 核心变更：Minor 1~9 收尾（批次 6.0.6）——未完成订单集合补「5-冻结」、封禁冻结集合补「7-退款被拒」、待支付超时取消按交易方式分档（邮寄 15 分钟 / 面交 120 分钟，均可配置）、下单 `quantity` 上限 100、日志 CR/LF 清洗、验证码 Key 按 scene 隔离（`email:code:{scene}:{email}`）、商品图片地址协议/前缀白名单、支付回调去重键改到事务提交后写；新增 3.9.9「Minor 收尾约定」。技术设计不变，仅追加实现约定与踩坑记录。
 V32 核心变更：新增 3.9.7「上传配额与文件清理约定」（先读图片头再解码、按用户双阈值配额、删商品/换图/换头像清理文件）、3.9.8「定时任务约定」（阈值接线、lock-at-most-for 接线、提醒去重+窗口、逐单独立事务）；订单状态机补「已支付面交单超期自动完成」兜底路径。技术设计不变，仅追加实现约定与踩坑记录。
@@ -1019,12 +1020,37 @@ Invoke-RestMethod -Uri $url -Method $method -Headers $headers `
 四处文案与倒计时统一按**订单快照的 `trade_type`** 取值；`ORDER_STATUS_MAP[0].actionHint` 改为不含分钟数的通用文案，
 具体分钟数由 `orderStatusHint(status, tradeType)` 计算（字典里写死必然有一边是错的）。
 
-> 前端侧约定（6.0.7 · 3.9.10）：**窗口分钟数只允许来自 `payTimeoutMinutes()`**，
+> 前端侧约定（6.0.7，随本节一并生效）：**窗口分钟数只允许来自 `payTimeoutMinutes()`**，
 > 任何页面都不许再写 `15 * 60` / "15 分钟" 这类字面量；待支付窗口的"真相"在后端（`app.task.timeout-cancel.*`），
 > 前端只是展示镜像，**判断是否真的超时一律以后端返回的 `status` 为准**，不用倒计时推算。
 
 ⚠️ **Redis Key 变更的兼容性**：`email:code:` 由无 scene 变为带 scene，旧 Key 最多 5 分钟后自然过期，
 不需要迁移脚本；但**部署后到旧 Key 过期之间，用旧格式取到的码不能再用**（属预期行为）。
+
+### 3.9.10 支付回调约定（V35 · S3 遗留批：金额校验）
+
+> 本节补齐自审报告 S3 的最后一块：6.0.2 只做了签名，**签名里没有金额** ——
+> 拿到 `PAY_CALLBACK_SECRET` 的人可以签"任意金额"的回调。现在签名覆盖金额，且服务端把金额与订单快照比对。
+
+**签名算法（四段，破坏性变更）**
+
+```text
+payload = orderNo + "|" + tradeNo + "|" + amount + "|" + timestamp   （UTF-8）
+sign    = HMAC-SHA256(payload, PAY_CALLBACK_SECRET)                  （十六进制小写）
+```
+
+| 约定 | 说明 |
+| :--- | :--- |
+| **amount 必须固定 2 位小数** | 服务端用 `setScale(2, RoundingMode.HALF_UP).toPlainString()` 归一（`"45.00"`）；**调用方必须先格式化再算签名**。这么约定是为了绕开 JSON 数字反序列化的 scale 不确定：`{"amount":45}` → `BigDecimal("45")`、`{"amount":45.00}` → `"45.00"`，直接拿原始值拼 payload 两端必然对不上 |
+| **金额比对必须用 `compareTo`** | `BigDecimal.equals` 会把 `45.00` 与 `45.0` 判为**不等**（scale 参与比较）。数据库侧 `tb_order.amount` 是 `DECIMAL(10,2)`，读出即 2 位小数 |
+| **参数校验先于验签** | `PayCallbackRequest.amount` 用 `@NotNull` + `@DecimalMin("0.01")` + `@DecimalMax("99999999.99")`，由 Controller 的 `@Valid` 在进业务逻辑前拦截（否则 `formatAmount(null)` 会把"请求格式错"报成"内部错误"）。`timestamp`/`sign` **仍不交给 Bean Validation**：它们的失败文案必须与验签失败统一，顺序也固定 |
+| **校验顺序（事务边界）** | 事务外：① 参数校验 → ② 验签 → ③ 查订单 → ④ 金额比对 → ⑤ 去重读侧 → ⑥ 状态判断；事务内：⑦ 状态机 `0→1`（`PayCallbackProcessor`，独立 Bean 才有事务）；提交后：⑧ 落去重键。**金额比对必须在查订单之后**（期望值来自订单快照），且**必须先于状态幂等**（金额不对即便订单已支付也要拒） |
+| **对外只有一句文案** | 签名错 / 时间戳过期 / 订单不存在 / 金额不匹配 → 一律 `code=100「回调签名校验失败」`；真实原因（含期望金额与实际金额）只进 `log.warn`。否则这个公开接口会变成"orderNo 是否存在、金额是多少"的探测器 |
+| **状态不允许 → 209** | 订单状态 ∉ {0 待支付, 1 已支付} 时返回 **209「当前状态不允许此操作」**（V35 起由"静默返回 false → 200 请勿重复回调"改为 209：真实的状态冲突应当让调用方看得出来）。status=1 + 金额一致仍走幂等（200 + `data=false`） |
+| **失败不占去重键** | 去重键 `pay:callback:{orderNo}:{tradeNo}` 只在**写库提交后**落（6.0.6 · Minor 9 的约定保持）：`PayCallbackProcessor` 抛异常回滚时一定不会写键，同一笔流水可安全重试 |
+
+⚠️ **旧三段签名（`orderNo|tradeNo|timestamp`）自 V35 起不再兼容**：本项目支付是模拟的、调用方只有自己的代码，
+属可控的 breaking change；`PayCallbackVerificationTest` ⑮ 用"旧格式签名必须被拒"把这条钉死。
 
 4. AI 扩展预留 (RAG 智能导购)
 MVP 阶段：关键词检索用 MySQL LIKE，必须匹配 title 或 description。必须参数化 CONCAT('%', #{keyword}, '%')，严禁拼接。

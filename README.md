@@ -1,4 +1,4 @@
-# 校园二手交易平台（V34 对齐）
+# 校园二手交易平台（V35 对齐）
 
 Java 21 + Spring Boot 3 + MyBatis-Plus + MySQL 8.0 + Redis + Flyway + ShedLock 的后端，
 Vue 3 + Vite + Element Plus 的前端。统一包名 `com.campus.market`，接口统一前缀 `/api/v1/`。
@@ -11,7 +11,7 @@ Vue 3 + Vite + Element Plus 的前端。统一包名 `com.campus.market`，接�
 | 后端 | Java 21、Spring Boot 3.2.5、MyBatis-Plus 3.5.5、MySQL 8.0、Redis、Flyway 10、ShedLock 5.10、jjwt 0.12.5、knife4j 4.4 + springdoc 2.3 |
 | 前端 | Vue 3（`<script setup>`）、Pinia、Vue Router 4、Element Plus 2.14、ECharts 6.1、Vite 5.4、Vitest + @vue/test-utils |
 
-> 版本号 `V34` 指 `PROJECT_CONTEXT.md` 头部变更记录中的当前版本（V34 = 前端倒计时按 trade_type 分档；V33 = 自审 Minor 1~9 收尾；V32 = 上传加固 + 定时任务加固 + 前端缩略图）。
+> 版本号 `V35` 指 `PROJECT_CONTEXT.md` 头部变更记录中的当前版本（V35 = 支付回调金额校验；V34 = 前端倒计时按 trade_type 分档；V33 = 自审 Minor 1~9 收尾）。
 > 各文档的版本对齐口径见「六、文档索引与同步约定」。
 
 ---
@@ -33,7 +33,7 @@ Vue 3 + Vite + Element Plus 的前端。统一包名 `com.campus.market`，接�
 | Controller（12 个、61 个端点） | `src/main/java/com/campus/market/controller/` |
 | Service 接口 + 实现（含库存回补统一入口 `StockService`） | `src/main/java/com/campus/market/service/` |
 | 配置类（MyBatis-Plus / Jackson / CORS / 线程池 / ShedLock / 安全 / 静态资源） | `src/main/java/com/campus/market/config/` |
-| 后端单元测试（48 个测试类、253 个用例） | `src/test/java/` |
+| 后端单元测试（49 个测试类、268 个用例） | `src/test/java/` |
 | 前端工程（17 个视图、27 条路由、9 个 api 模块、25 个组件） | `frontend/` |
 | 前端单元测试（21 个测试文件、220 个用例） | `frontend/src/**/__tests__/` |
 | 前端构建门禁（样式隔离 / 分包断言） | `frontend/scripts/verify-styles.mjs`、`verify-chunks.mjs` |
@@ -217,6 +217,8 @@ prod 还多两道启动断言（fail-fast，见 `EmailCodeServiceImpl#assertSkip
 | 6.0.5.1 | M2：面交订单由**卖家确认收款**才完成 1→3（前端配套按钮）；M5：已售罄商品编辑后重新进入待审核 |
 | 6.0.5.2 | M6：上传加固（先按文件头读图片尺寸并限制总像素，再落地；单用户文件数 / 总容量配额，删除与配额回滚成对；换图/换头像时清理旧文件）；定时任务加固（参数化 SQL、ShedLock 占用时长可配、超时取消每单独立事务、面交自动确认兜底） |
 | 6.0.6 | Minor 快修（无新功能）：未完成订单集合补 5-冻结、封禁冻结集合补 7-退款被拒、待支付超时按交易方式分档（邮寄 15 / 面交 120 分钟）、`quantity` 上限 100、日志 CR/LF 清洗（`LogSanitizer`）、验证码按 scene 隔离（`email:code:{scene}:{email}`）、图片地址协议/前缀白名单、支付回调去重键改到事务提交后写；`.gitignore` 忽略 `.env*`（保留 `.env.example`） |
+| 6.0.7 | 前端待支付倒计时/文案按 `tradeType` 分档（面交 120 / 邮寄 15 分钟，`payTimeoutMinutes()` + `PayCountdown` 的 `tradeType` prop） |
+| V35（S3 遗留） | **支付回调金额校验**：签名 payload 由三段改为四段 `orderNo\|tradeNo\|amount\|timestamp`（amount 固定 2 位小数），服务端用 `BigDecimal.compareTo` 与订单金额比对；`amount` 走 Bean Validation（非空 + 0.01~99999999.99）；校验链全在事务外、状态机独立成 `PayCallbackProcessor`（事务内）；失败对外统一 `code=100「回调签名校验失败」`，状态不允许 → 209；旧三段签名不再兼容 |
 
 上传与静态访问约定：文件存到 `app.storage.local.base-path`（默认 `./uploads`），访问前缀
 `app.storage.local.url-prefix`（默认 `/static/uploads`，由 `WebMvcConfig#addResourceHandlers` 映射，
@@ -299,7 +301,9 @@ prod 还多两道启动断言（fail-fast，见 `EmailCodeServiceImpl#assertSkip
 - [ ] 1000 线程并发抢购测试（`CountDownLatch` + `ThreadPoolExecutor`，论文核心数据）
 - [ ] `MinioStorageImpl`（可选实现，需自行引入 minio 依赖并设 `STORAGE_TYPE=minio`）
 - [ ] RAG 智能导购（Spring AI + ES 8.x + BGE-M3）替换 `AiSearchServiceImpl` 的关键词实现
-- [ ] 支付回调金额校验（当前校验签名与时间窗，未回查订单金额一致性）
+- [x] 支付回调金额校验（V35 已完成：签名覆盖 amount + `compareTo` 与订单金额比对；旧三段签名不再兼容）
+- [ ] 支付回调**安全告警**：频繁的"金额不匹配/验签失败"可能是攻击信号，目前只有 `log.warn`，
+      将来可接 Prometheus 指标或邮件告警（已列入下一批建议）
 - [x] 自审报告 Minor 1–9 的收尾（批次 6.0.6：未完成订单集合补 5-冻结、封禁冻结集合补 7-退款被拒、
       待支付超时按交易方式分档 15/120 分钟、`quantity` 补 `@Max(100)`、日志 CR/LF 清洗、
       验证码按 scene 隔离、`User.password` 序列化回归锁定、图片 URL 协议白名单、支付回调去重键改到提交后写）

@@ -1,4 +1,4 @@
-# 校园二手交易平台 · 接口清单（V34 封版对齐）
+# 校园二手交易平台 · 接口清单（V35 封版对齐）
 
 > 统一前缀：`/api/v1/`
 > 统一响应体：`Result<T> { code:int, msg:String, data:T }`
@@ -107,7 +107,7 @@
 | 4.3 | GET | `/api/v1/order/list` | 强制认证 | `status?` `role?`(buyer/seller) `page` `size` | `data`: 分页 `OrderVO`（含 `product_title` 快照） |
 | 4.4 | GET | `/api/v1/order/detail/{id}` | 强制认证 | - | `data`: `OrderDetailVO`；归属校验失败 203；商品已逻辑删除时用自定义 SQL 绕过逻辑删除取商品信息 |
 | 4.5 | PUT | `/api/v1/order/pay/{id}` | 强制认证（买家） | - | `status: 0→1`，`pay_time=NOW()`；冲突 209 |
-| 4.6 | POST | `/api/v1/order/pay/callback` | 公开（**HMAC-SHA256 验签**，批次 6.0.2 · S3） | body: `orderNo` `tradeNo` `timestamp`(毫秒) `sign`(**HMAC-SHA256 十六进制小写**) | 校验顺序：时间戳在 `app.pay.timestamp-window-seconds`(默认 300s) 内 → `sign` 非空 → HMAC 匹配 → 订单存在；任一失败 **code=100「回调签名校验失败」且不改状态**。`sign = HMAC-SHA256(orderNo+"|"+tradeNo+"|"+timestamp, PAY_CALLBACK_SECRET)`；通过后按 `order_no + 回调流水号` 幂等去重（`pay:callback:{orderNo}:{tradeNo}`，TTL 7 天，**读侧在事务内判定、写侧在事务提交后才落键** —— 批次 6.0.6 · Minor 9：修前在事务内 SETNX，回滚会留下"已占位但没生效"的键，同一笔流水重试被永久吞掉）。未配置 `PAY_CALLBACK_SECRET` 时回调一律拒绝（fail-closed）。**遗留：payload 不含金额，接真实网关前必须补** |
+| 4.6 | POST | `/api/v1/order/pay/callback` | 公开（**HMAC-SHA256 验签 + 金额校验**，批次 6.0.2 · S3 / V35 补金额） | body: `orderNo` `tradeNo` `amount` `timestamp`(毫秒) `sign`(**HMAC-SHA256 十六进制小写**) | 见下方「支付回调契约」。**失败一律 `code=100「回调签名校验失败」`**（不区分真实原因）；状态不允许 → **209**；通过 → 按 `order_no + tradeNo` 幂等去重 |
 | 4.7 | PUT | `/api/v1/order/cancel/{id}` | 强制认证（买家） | `reason?` | `status: 0→4`，`cancel_by=买家ID` + **库存回补**；买家仅可取消 status=0 |
 | 4.8 | PUT | `/api/v1/order/ship/{id}` | 强制认证（卖家） | - | `status: 1→2`，`ship_time=NOW()`，仅 `trade_type IN (2,3)`；面交发货 → 209 |
 | 4.9 | PUT | `/api/v1/order/receive/{id}` | 强制认证（买家） | - | 邮寄 `2→3`；面交 `1→3`（`trade_type=1`）；`finish_time=NOW()` |
@@ -117,6 +117,53 @@
 | 4.12 | PUT | `/api/v1/order/refund/agree/{id}` | 强制认证（卖家） | - | `6→4`，`cancel_time=NOW()` + **库存回补** |
 | 4.13 | PUT | `/api/v1/order/refund/reject/{id}` | 强制认证（卖家） | `rejectReason` | `6→7`，`refund_reject_time=NOW()`；3 天后定时任务自动恢复 1/2 |
 | 4.14 | GET | `/api/v1/order/refund/list` | 强制认证 | `role?` `page` `size` | 退款申请列表（status=6/7） |
+
+### 4.6.1 支付回调契约（V35 起签名覆盖金额）
+
+**请求体**：
+
+```json
+{
+  "orderNo": "359642335883169792",
+  "tradeNo": "TRADE-ACCEPT-001",
+  "amount": 45.00,
+  "timestamp": 1726704000000,
+  "sign": "abc..."
+}
+```
+
+**签名算法（V35 起）**：
+
+- `payload = orderNo + "|" + tradeNo + "|" + amount + "|" + timestamp`（UTF-8）
+- `amount` **必须格式化为 2 位小数字符串**（如 `"45.00"`，不是 `"45"` 或 `"45.0"`）
+- **调用方必须先格式化 amount 再算签名**（不能直接用原始金额字符串）——服务端在算签名前会
+  `setScale(2, HALF_UP).toPlainString()` 归一，两端格式不一致必然验签失败
+- `timestamp` 为毫秒级 Unix 时间戳，偏差不得超过 `app.pay.timestamp-window-seconds`（默认 300 秒）
+- `sign = HMAC-SHA256(payload, PAY_CALLBACK_SECRET)` 的十六进制小写
+
+**历史格式（V34 及之前）**：`payload = orderNo + "|" + tradeNo + "|" + timestamp` —— **V35 起废弃、不再兼容**
+（本项目支付是模拟的，调用方只有自己的代码，属可控的 breaking change）。
+
+**校验顺序（事务边界）**：
+
+| 步骤 | 位置 | 失败结果 |
+| :--- | :--- | :--- |
+| ① 参数校验（`@Valid`：`orderNo`/`tradeNo` 非空，`amount` 非空且 0.01~99999999.99） | 事务外 | `code=100` + **字段文案**（如「支付金额不能为空」） |
+| ② 验签（时间戳窗口 → 签名非空 → HMAC 常量时间比对） | 事务外 | `code=100「回调签名校验失败」` |
+| ③ 查订单（按 `orderNo`） | 事务外（只读） | 同上（不暴露 orderNo 是否存在） |
+| ④ **金额比对**（`amount.compareTo(order.amount)`） | 事务外 | 同上（不暴露期望/实际金额） |
+| ⑤ 幂等去重读侧（Redis `pay:callback:{orderNo}:{tradeNo}`） | 事务外 | 命中 → `200` + `data=false` |
+| ⑥ 状态判断 | 事务外 | `status=1` → `200` + `data=false`（幂等）；其余非 0 → **`209「当前状态不允许此操作」`** |
+| ⑦ 状态机 `0→1` + 通知卖家 | **事务内** | — |
+| ⑧ 落去重键（TTL 7 天） | 提交后 | 写失败只降级告警（状态机兜底） |
+
+**响应**：
+
+- 成功：`{"code":200,"data":true,"msg":"支付成功"}`
+- 重复回调 / 已支付：`{"code":200,"data":false,"msg":"请勿重复回调"}`
+- 校验失败（签名/时间戳/订单不存在/金额不匹配）：`{"code":100,"msg":"回调签名校验失败"}`（**不区分真实原因，防信息泄露**）
+- 状态不允许：`{"code":209,"msg":"当前状态不允许此操作"}`
+- 未配置 `PAY_CALLBACK_SECRET`：一律拒绝（fail-closed，prod 下启动即失败）
 
 > **待支付超时自动取消（0→4，批次 6.0.6 · Minor 3 起按交易方式分档）**：`ScheduledTasks.cancelTimeoutOrders` 每 1 分钟扫描一次
 > （`@SchedulerLock` 名 `cancelTimeoutOrderTask`），阈值取自 `app.task.timeout-cancel`：

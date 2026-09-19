@@ -791,6 +791,62 @@ d	prod 全配好 → 正常启动（18081）；/doc.html、/v3/api-docs、/swagg
 	· 后端配置若被改成非 15/120，前端常量需手工同步（两侧无自动校验）—— 已在注释与文档中写明对应关系
 
 
+===============================================================
+V35 / S3 遗留批测试结果（支付回调金额校验：签名覆盖金额 + compareTo 比对）
+===============================================================
+测试时间	2026-09-19 18:04 ~ 18:14
+测试范围	补齐自审报告 S3 的最后一块：6.0.2 的签名 payload 只有 orderNo|tradeNo|timestamp（**不含金额**），
+		拿到 PAY_CALLBACK_SECRET 就能签"任意金额"的回调。本批：① payload 改四段
+		orderNo|tradeNo|amount|timestamp（amount 固定 2 位小数）；② 服务端查订单后用 compareTo
+		与 tb_order.amount（DECIMAL(10,2)）比对；③ amount 走 Bean Validation；④ 校验链移到事务外，
+		状态机独立成 PayCallbackProcessor；⑤ 订单状态非 0/1 由"静默 false"改为 209。
+		**只改支付回调相关代码**（新增 1 个 support 类，无依赖变更、无库表变更）。
+测试环境	Windows 11 / OpenJDK 21.0.12（javac 直编）/ MySQL 8.0.46 / Redis 5.0.14 / dev profile @18080
+
+一、后端编译与全量单测
+命令	javac -parameters（160 个主源文件）→ 测试类编译 → JUnit Platform Launcher
+结果	**268 / 268 通过**（本批前 253，本批 +15：PayCallbackVerificationTest 7 → 15；
+		新增 PayCallbackAmountValidationTest 7）
+说明	金额相关用例的签名全部由测试侧用 JDK Mac **独立**计算（不复用被测代码的 hmacSha256Hex），
+		否则实现写错时用例会跟着一起错
+
+二、真机检查（12 项全 PASS，脚本 target/batch-6.0.2/scenario-s3.ps1，密钥 dev-pay-callback-secret-…）
+	★场景1	签名正确 + amount=45.00 → code=200、data=true、订单 0→1
+	★场景2	签名正确但金额=1.00（≠订单 45.00）→ code=100「回调签名校验失败」，订单仍 0
+	★场景3	body 金额 45.00 但签名用 "1.00" 算 → code=100（验签阶段即失败），订单仍 0
+	★场景4	金额精度：body 传 45（整数）+ 签名用 "45.00" → code=200（服务端 setScale(2) 归一后两端一致）
+	★场景5	订单已支付（status=1）+ 金额不匹配 → code=100（**金额校验优先于状态幂等**）
+	附加6	订单已支付 + 金额一致 → code=200 且 data=false（幂等，不是 209）
+	附加7	不传 amount → code=100「支付金额不能为空」（Bean Validation 在业务逻辑之前拦截）
+	附加8	amount=0 → code=100「支付金额必须大于 0」
+	附加9	已取消订单 + 金额一致 → code=209「当前状态不允许此操作」
+	附加10	旧三段 payload 的签名 → code=100（breaking change 生效）
+
+三、前端（本批未改前端，跑一遍确认无回归）
+命令	npx vitest run
+结果	21 个文件 / 220 个用例全绿
+
+四、本批踩到的两个坑（都是"验证脚本"的坑，与产品代码无关）
+	坑①	**`$pid` 是 PowerShell 的只读自动变量**（当前进程 ID）：脚本里写 `$pid = $product.data.id`
+		会抛 "Cannot overwrite variable PID because it is read-only or constant."，
+		而 `$ErrorActionPreference=Continue` 下它只是**非终止错误** → 赋值失败、`$pid` 仍是进程号，
+		于是审核请求打到了 `/admin/product/audit/<进程号>`（被 Out-Null 吞掉）→ 商品停在 status=3
+		→ 下单报 204「商品不存在或已下架」。教训：脚本里别用 `$pid/$PASS/$host` 这类自动变量/保留名，
+		且**每个准备步骤都要断言返回码**，不要一律 `| Out-Null`。
+		（6.0.6 踩的是 `$PASS` 与 `$script:pass` 同名——同类问题的第二次，已写进 3.9.10 的备注思路。）
+	坑②	商品 stock 给太小（5）而用例要下 6 单：第 6 单时库存归零、商品变 2-售罄 → 下单 204。
+		真机脚本里的"专供商品"库存要按用例数量给足（本批改为 20）。
+
+五、没能验证的部分
+	· **并发场景未做真机**：两个完全相同的回调并发到达时"只有一个生效"，
+	  由状态机 `UPDATE ... WHERE status = 0`（影响行数判据）+ Redis 去重键双重兜底；
+	  单测覆盖了"去重键命中直接返回 false"与"影响行数 0 → 返回 false"，但未做真机并发压测
+	· 未验证接**真实支付网关**的兼容性（本项目支付是模拟的；金额格式/字段名是为模拟网关约定的）
+	· 频繁的"金额不匹配 / 验签失败"目前只 `log.warn`，**未接告警**（列入下一批建议）
+	· 真机脚本创建的测试账号/商品/订单仍留在 dev 库（沿用既有做法，答辩前统一清理）
+
+
+
 
 
 
