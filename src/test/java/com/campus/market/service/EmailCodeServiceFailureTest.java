@@ -79,7 +79,7 @@ class EmailCodeServiceFailureTest {
         doThrow(new MailSendException("SMTP 连接超时（测试注入）"))
                 .when(mailSender).send(any(SimpleMailMessage.class));
 
-        String codeKey = RedisKeys.emailCode(EMAIL);
+        String codeKey = RedisKeys.emailCode(SCENE, EMAIL);
 
         assertThatThrownBy(() -> emailCodeService.send(EMAIL, SCENE))
                 .as("SMTP 失败时应抛业务异常，而不是把异常吞掉")
@@ -103,7 +103,7 @@ class EmailCodeServiceFailureTest {
 
         // 核心断言：发送失败必须把本次验证码删掉，绝不能留下一个"送不到却能用"的有效码
         assertThat(redisTemplate.hasKey(codeKey))
-                .as("SMTP 失败后 email:code:%s 必须被删除，否则会出现无法送达但仍可用的验证码", EMAIL)
+                .as("SMTP 失败后 email:code:%s:%s 必须被删除，否则会出现无法送达但仍可用的验证码", SCENE, EMAIL)
                 .isFalse();
         assertThat(redisTemplate.opsForValue().get(codeKey)).isNull();
     }
@@ -117,7 +117,7 @@ class EmailCodeServiceFailureTest {
      */
     private void clearRedisKeys() {
         redisTemplate.delete(List.of(
-                RedisKeys.emailCode(EMAIL),
+                RedisKeys.emailCode(SCENE, EMAIL),
                 RedisKeys.emailLimit(EMAIL),
                 RedisKeys.emailFail(EMAIL),
                 RedisKeys.emailLock(EMAIL)));

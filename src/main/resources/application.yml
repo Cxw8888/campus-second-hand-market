@@ -215,7 +215,11 @@ app:
       queue-capacity: 200
       keep-alive-seconds: 60
     timeout-cancel:
+      # 邮寄单（trade_type IN (2,3)）待支付超时：15 分钟
       minutes: 15
+      # 面交单（trade_type = 1）待支付超时：120 分钟（批次 6.0.6 · Minor 3）
+      # 校园面交是"约时间地点见面"，用邮寄的 15 分钟会把大量真实面交单误取消。
+      face-minutes: 120
       lock-at-most-for: PT5M
     auto-confirm:
       days: 7

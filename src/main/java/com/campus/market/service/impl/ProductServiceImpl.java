@@ -8,6 +8,7 @@ import com.campus.market.common.enums.ErrorCode;
 import com.campus.market.common.exception.BusinessException;
 import com.campus.market.common.result.PageResult;
 import com.campus.market.config.properties.SearchProperties;
+import com.campus.market.config.properties.StorageProperties;
 import com.campus.market.dto.product.ProductQuery;
 import com.campus.market.dto.product.ProductSaveRequest;
 import com.campus.market.entity.Category;
@@ -24,6 +25,7 @@ import com.campus.market.security.UserContext;
 import com.campus.market.service.ProductService;
 import com.campus.market.service.StorageService;
 import com.campus.market.service.support.SearchCircuitBreaker;
+import com.campus.market.util.LogSanitizer;
 import com.campus.market.vo.ProductDetailVO;
 import com.campus.market.vo.ProductListVO;
 import com.fasterxml.jackson.core.type.TypeReference;
@@ -155,13 +157,22 @@ public class ProductServiceImpl implements ProductService {
             },
             new ThreadPoolExecutor.AbortPolicy());
 
-    /** 未完成订单状态：存在这些订单的商品禁止删除（code=207）。 */
+    /**
+     * 未完成订单状态：存在这些订单的商品禁止删除（code=207）。
+     *
+     * <p><b>批次 6.0.6 · Minor 1</b>：补上 {@link OrderStatus#FROZEN}（5-已冻结）。
+     * 修前冻结订单不在集合里，卖家可以删掉"被封禁冻结"订单关联的商品 ——
+     * 之后管理员解冻选 CANCEL 时，回补 SQL 因 {@code AND is_deleted = 0} 命中 0 行，
+     * <b>库存静默丢失</b>（货已删、数量也补不回来）。冻结是"交易暂停"，
+     * 它和其他未完成状态一样必须挡住删除。</p>
+     */
     private static final List<Integer> UNFINISHED_ORDER_STATUS = List.of(
             OrderStatus.PENDING_PAY,
             OrderStatus.PAID,
             OrderStatus.SHIPPED,
             OrderStatus.REFUND_APPLYING,
-            OrderStatus.REFUND_REJECTED
+            OrderStatus.REFUND_REJECTED,
+            OrderStatus.FROZEN
     );
 
     private final ProductMapper productMapper;
@@ -174,6 +185,8 @@ public class ProductServiceImpl implements ProductService {
     private final SearchCircuitBreaker searchCircuitBreaker;
     /** 图片文件清理（批次 6.0.5.2 · M6-A3）：删商品 / 换图时删除磁盘原图。 */
     private final StorageService storageService;
+    /** 上传访问前缀（批次 6.0.6 · Minor 8）：图片 URL 白名单要用它，避免硬编码 /static/uploads。 */
+    private final StorageProperties storageProperties;
 
     /** 容器关闭时收掉搜索线程池（daemon 线程虽不阻塞退出，显式关闭更干净）。 */
     @PreDestroy
@@ -309,7 +322,7 @@ public class ProductServiceImpl implements ProductService {
     @Transactional(rollbackFor = Exception.class)
     public void delete(Long id) {
         Product product = requireOwnProduct(id);
-        // 存在未完成订单（0/1/2/6/7）→ 禁止删除
+        // 存在未完成订单（0/1/2/6/7/5，含冻结）→ 禁止删除
         Long unfinished = orderMapper.selectCount(Wrappers.<Order>lambdaQuery()
                 .eq(Order::getProductId, id)
                 .in(Order::getStatus, UNFINISHED_ORDER_STATUS));
@@ -438,7 +451,7 @@ public class ProductServiceImpl implements ProductService {
             // 熔断期间直接兜底，不打 DB。注意：这条空结果**不写缓存**，
             // 否则一次 30 秒的熔断会被 60 秒的缓存"续命"，比熔断本身活得更久。
             log.warn("搜索已熔断，直接返回空列表（搜索繁忙，请稍后重试）: keyword={}, timeoutMs={}, openMillis={}",
-                    keyword, breakerConfig.getTimeoutMs(), breakerConfig.getOpenMillis());
+                    LogSanitizer.sanitize(keyword), breakerConfig.getTimeoutMs(), breakerConfig.getOpenMillis());
             return PageResult.empty(query.current(), query.pageSize());
         }
 
@@ -491,7 +504,8 @@ public class ProductServiceImpl implements ProductService {
         } catch (ExecutionException e) {
             // 能走到这里说明 FULLTEXT 与 LIKE **两条路都失败了**（doKeywordSearch 已吞掉前者）
             Throwable cause = e.getCause() == null ? e : e.getCause();
-            log.warn("搜索执行失败（FULLTEXT 与 LIKE 均未成功）: keyword={}, err={}", keyword, cause.getMessage());
+            log.warn("搜索执行失败（FULLTEXT 与 LIKE 均未成功）: keyword={}, err={}",
+                    LogSanitizer.sanitize(keyword), cause.getMessage());
             if (cause instanceof RuntimeException runtimeException) {
                 throw runtimeException;
             }
@@ -511,7 +525,8 @@ public class ProductServiceImpl implements ProductService {
             try {
                 return runKeywordQuery(query, keyword, true);
             } catch (DataAccessException e) {
-                log.warn("FULLTEXT 检索不可用，降级为 LIKE: keyword={}, err={}", keyword, e.getMessage());
+                log.warn("FULLTEXT 检索不可用，降级为 LIKE: keyword={}, err={}",
+                        LogSanitizer.sanitize(keyword), e.getMessage());
             }
         }
         return runKeywordQuery(query, keyword, false);
@@ -559,15 +574,21 @@ public class ProductServiceImpl implements ProductService {
         return PageResult.of(total, query.current(), query.pageSize(), toVoList(records));
     }
 
-    /** 记录一次超时并处理熔断开闸日志。 */
+    /**
+     * 记录一次超时并处理熔断开闸日志。
+     *
+     * <p>关键字经 {@link LogSanitizer} 清洗（批次 6.0.6 · Minor 5）：
+     * {@code keyword} 完全来自查询参数，带 {@code \r\n} 就能伪造日志行。</p>
+     */
     private void recordSearchTimeout(String keyword, String reason) {
         boolean opened = searchCircuitBreaker.recordTimeout();
+        String safeKeyword = LogSanitizer.sanitize(keyword);
         if (opened) {
             log.error("搜索连续超时达阈值，熔断开闸 {}ms（期间直接返回空列表）: keyword={}, reason={}",
-                    searchProperties.getCircuitBreaker().getOpenMillis(), keyword, reason);
+                    searchProperties.getCircuitBreaker().getOpenMillis(), safeKeyword, reason);
         } else {
             log.warn("搜索超时（第 {} 次连续）: keyword={}, reason={}",
-                    searchCircuitBreaker.consecutiveTimeouts(), keyword, reason);
+                    searchCircuitBreaker.consecutiveTimeouts(), safeKeyword, reason);
         }
     }
 
@@ -921,7 +942,17 @@ public class ProductServiceImpl implements ProductService {
     }
 
     /**
-     * 图片列表规范化（Stream API）：去空、去首尾空格、去重，并校验非空且 ≤ 9 张。
+     * 图片列表规范化（Stream API）：去空、去首尾空格、去重，校验协议白名单，并校验非空且 ≤ 9 张。
+     *
+     * <p><b>批次 6.0.6 · Minor 8 —— 协议 / 前缀白名单</b>：
+     * 修前只做"非空 + 条数"，任何字符串都能进库并<b>原样渲染到 {@code <img src>}</b>。
+     * 落点是图片标签，不构成 XSS（{@code javascript:} 在 {@code img.src} 里不会执行），
+     * 但仍有三个真实问题：① 外链可当追踪像素（谁看过这件商品，站外站点一清二楚）；
+     * ② 可以挂载第三方图片做"以图引流"；③ 站内图失效时无从判断是上传坏了还是被塞了外链。</p>
+     *
+     * <p>只允许两类：<b>站内上传的相对地址</b>（{@code app.storage.local.url-prefix}，默认
+     * {@code /static/uploads}，来自配置不硬编码）与 <b>http(s) 绝对地址</b>。
+     * 其余（{@code javascript:}、{@code data:}、{@code file:}、协议相对地址 {@code //host/x}）一律 code=100。</p>
      */
     private List<String> normalizeImageUrls(ProductSaveRequest request) {
         List<String> raw = request.getImageUrls();
@@ -940,7 +971,42 @@ public class ProductServiceImpl implements ProductService {
         if (imageUrls.size() > 9) {
             throw new BusinessException(ErrorCode.PARAM_ERROR, "商品图片最多9张");
         }
+        for (String url : imageUrls) {
+            requireAllowedImageUrl(url);
+        }
         return imageUrls;
+    }
+
+    /**
+     * 单条图片地址白名单校验（批次 6.0.6 · Minor 8）。
+     *
+     * <p>前缀同样走配置（{@code app.storage.local.url-prefix}）：换存储前缀时校验自动跟着走，
+     * 不会出现"配置改了、校验还认旧前缀"的错配。</p>
+     */
+    private void requireAllowedImageUrl(String url) {
+        String prefix = imageUrlPrefix();
+        if (url.startsWith(prefix + "/")) {
+            return;
+        }
+        // 注意用 regionMatches 而不是 toLowerCase().startsWith("http")：
+        // 后者会把 "httpx://" 也放进来（"httpx" 不是协议，但前缀匹配会误判）。
+        boolean httpUrl = url.regionMatches(true, 0, "http://", 0, 7)
+                || url.regionMatches(true, 0, "https://", 0, 8);
+        if (httpUrl) {
+            return;
+        }
+        throw new BusinessException(ErrorCode.PARAM_ERROR,
+                "商品图片地址不合法，仅支持站内上传地址（" + prefix + "/...）或 http(s) 链接");
+    }
+
+    /** 上传访问前缀（去掉结尾的 '/'，便于与前缀拼接判断）。 */
+    private String imageUrlPrefix() {
+        String prefix = storageProperties.getLocal() == null ? null : storageProperties.getLocal().getUrlPrefix();
+        if (prefix == null || prefix.isBlank()) {
+            return "/static/uploads";
+        }
+        String trimmed = prefix.trim();
+        return trimmed.endsWith("/") ? trimmed.substring(0, trimmed.length() - 1) : trimmed;
     }
 
     private void requireCategory(Long categoryId) {

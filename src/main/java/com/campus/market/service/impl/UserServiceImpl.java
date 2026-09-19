@@ -150,7 +150,8 @@ public class UserServiceImpl implements UserService {
         }
 
         // ③ 校验新邮箱验证码（格式 / 后缀 / 限流 / 锁定 / 失败计量均在 EmailCodeService 内处理）
-        emailCodeService.verify(newEmail, request.getEmailCode());
+        //    scene=BIND_EMAIL（批次 6.0.6 · Minor 6）：与取码时的场景必须一致
+        emailCodeService.verify(newEmail, EmailCodeService.SCENE_BIND_EMAIL, request.getEmailCode());
 
         User update = new User();
         update.setId(userId);

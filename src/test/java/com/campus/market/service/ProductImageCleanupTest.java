@@ -3,6 +3,7 @@ package com.campus.market.service;
 import com.baomidou.mybatisplus.core.MybatisConfiguration;
 import com.baomidou.mybatisplus.core.metadata.TableInfoHelper;
 import com.campus.market.config.properties.SearchProperties;
+import com.campus.market.config.properties.StorageProperties;
 import com.campus.market.dto.product.ProductSaveRequest;
 import com.campus.market.entity.Category;
 import com.campus.market.entity.Product;
@@ -102,7 +103,7 @@ class ProductImageCleanupTest {
     void setUp() {
         productService = new ProductServiceImpl(productMapper, categoryMapper, orderMapper, userMapper,
                 stringRedisTemplate, new ObjectMapper().registerModule(new JavaTimeModule()),
-                searchProperties, searchCircuitBreaker, storageService);
+                searchProperties, searchCircuitBreaker, storageService, new StorageProperties());
 
         when(productMapper.selectById(PRODUCT_ID)).thenReturn(product(List.of(IMAGE_A, IMAGE_B), ProductStatus.ON_SALE));
         when(categoryMapper.selectById(CATEGORY_ID)).thenReturn(new Category());

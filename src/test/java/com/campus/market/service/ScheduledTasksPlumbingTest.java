@@ -145,7 +145,7 @@ class ScheduledTasksPlumbingTest {
     @DisplayName("B4 超时取消：逐单调用处理器，一单失败其它单照常处理，异常不外抛")
     void cancelTimeoutShouldIsolateFailures() {
         taskProperties.getTimeoutCancel().setBatchLimit(100);
-        when(orderMapper.selectTimeoutPendingOrders(15, 100)).thenReturn(List.of(
+        when(orderMapper.selectTimeoutPendingOrders(15, 120, 100)).thenReturn(List.of(
                 order(1L, OrderStatus.PENDING_PAY, 1),
                 order(2L, OrderStatus.PENDING_PAY, 1),
                 order(3L, OrderStatus.PENDING_PAY, 1)));

@@ -17,7 +17,12 @@ public class TaskProperties {
 
     private NotificationPool notification = new NotificationPool();
 
-    /** 超时取消：status=0 且创建时间超 15 分钟，每 1 分钟扫描一次，lockAtMostFor=PT5M。 */
+    /**
+     * 超时取消：{@code status=0} 且创建时间超过阈值，每 1 分钟扫描一次，lockAtMostFor=PT5M。
+     *
+     * <p>阈值<b>按交易方式区分</b>（批次 6.0.6 · Minor 3）：邮寄 15 分钟、面交 120 分钟
+     * （校园面交是约时间见面，15 分钟就取消与真实场景不符）。</p>
+     */
     private TimeoutCancel timeoutCancel = new TimeoutCancel();
 
     /**
@@ -39,8 +44,15 @@ public class TaskProperties {
 
     @Data
     public static class TimeoutCancel {
-        /** 待支付订单超时阈值（分钟）。 */
+        /** 邮寄单（trade_type IN (2,3)）待支付超时阈值（分钟）。 */
         private int minutes = 15;
+        /**
+         * 面交单（trade_type = 1）待支付超时阈值（分钟，批次 6.0.6 · Minor 3）。
+         *
+         * <p>面交是"约时间地点见面"，买家在路上/在找卖家都很正常，
+         * 用邮寄的 15 分钟会大量误取消真实面交订单。</p>
+         */
+        private int faceMinutes = 120;
         /** 单批处理上限（每单独立事务，失败不影响其它单）。 */
         private int batchLimit = 200;
         private String lockAtMostFor = "PT5M";

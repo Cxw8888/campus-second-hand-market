@@ -5,6 +5,7 @@ import com.baomidou.mybatisplus.core.metadata.TableInfoHelper;
 import com.baomidou.mybatisplus.extension.plugins.pagination.Page;
 import com.campus.market.common.result.PageResult;
 import com.campus.market.config.properties.SearchProperties;
+import com.campus.market.config.properties.StorageProperties;
 import com.campus.market.dto.product.ProductQuery;
 import com.campus.market.entity.Category;
 import com.campus.market.entity.Product;
@@ -162,7 +163,7 @@ class ProductSearchTest {
         // 构造参数顺序 = ProductServiceImpl 里 final 字段的声明顺序
         productService = new ProductServiceImpl(productMapper, categoryMapper, orderMapper,
                 userMapper, stringRedisTemplate, new ObjectMapper().registerModule(new JavaTimeModule()),
-                searchProperties, breaker, storageService);
+                searchProperties, breaker, storageService, new StorageProperties());
     }
 
     // ================================================================ FULLTEXT 与降级

@@ -21,6 +21,14 @@ target/
 *.iml
 .vscode/
 
+# 环境变量文件（批次 6.0.6 · 自审 Minor 20 残留）
+# 当前仓库没有 .env，但敏感值（PAY_CALLBACK_SECRET / JWT_SECRET / DB_PASSWORD / API key）
+# 将来很可能落在 .env* 里 —— 一旦被 commit 就会推到公开仓库，故默认全部忽略。
+# 例外：.env.example 是**不含真实值的模板**，必须能被跟踪（`!` 取反要放在忽略规则之后）。
+.env
+.env.*
+!.env.example
+
 # 系统
 .DS_Store
 Thumbs.db

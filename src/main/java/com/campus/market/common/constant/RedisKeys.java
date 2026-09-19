@@ -154,9 +154,19 @@ public final class RedisKeys {
         return LOGIN_LOCK_IP_PREFIX + ip;
     }
 
-    /** email:code:{email} */
-    public static String emailCode(String email) {
-        return EMAIL_CODE_PREFIX + email;
+    /**
+     * email:code:{scene}:{email} —— 验证码按<b>场景</b>隔离（批次 6.0.6 · Minor 6）。
+     *
+     * <p>修前是 {@code email:code:{email}}（无 scene）：用 {@code scene=REGISTER} 取到的码
+     * 可以直接用于 {@code reset-password} / {@code change-email} —— 而注册是"谁都能调"的场景，
+     * 于是"换个场景用码"等于把找回密码/换绑邮箱的验证码门槛降到了注册那一档
+     * （自审报告 Minor 6）。加上 scene 维度后，取码场景与用码场景必须一致，否则 103。</p>
+     *
+     * <p>scene 由 {@code EmailCodeServiceImpl#normalizeScene} 归一（大写 + 去空白，
+     * 空值统一落到 {@code VERIFY}），保证"取码"与"用码"两侧的 Key 一定拼得一样。</p>
+     */
+    public static String emailCode(String scene, String email) {
+        return EMAIL_CODE_PREFIX + scene + ":" + email;
     }
 
     /** email:limit:{email} */

@@ -81,7 +81,8 @@ public class EmailCodeServiceImpl implements EmailCodeService {
     @Override
     public EmailCodeVO send(String email, String scene) {
         String normalized = normalizeEmail(email);
-        String codeKey = RedisKeys.emailCode(normalized);
+        String normalizedScene = normalizeScene(scene);
+        String codeKey = RedisKeys.emailCode(normalizedScene, normalized);
         String limitKey = RedisKeys.emailLimit(normalized);
 
         // ① 已锁定（固定 30 分钟）：直接拒绝，且不消耗发送限流额度
@@ -128,8 +129,9 @@ public class EmailCodeServiceImpl implements EmailCodeService {
     }
 
     @Override
-    public void verify(String email, String code) {
+    public void verify(String email, String scene, String code) {
         String normalized = normalizeEmail(email);
+        String normalizedScene = normalizeScene(scene);
         String failKey = RedisKeys.emailFail(normalized);
 
         // ① 已锁定（固定 30 分钟）→ 107（锁定期间拒绝，不再累计）
@@ -138,7 +140,7 @@ public class EmailCodeServiceImpl implements EmailCodeService {
             throw new BusinessException(ErrorCode.EMAIL_CODE_LOCKED);
         }
 
-        String codeKey = RedisKeys.emailCode(normalized);
+        String codeKey = RedisKeys.emailCode(normalizedScene, normalized);
         String cached;
         try {
             cached = redisTemplate.opsForValue().get(codeKey);
@@ -151,8 +153,8 @@ public class EmailCodeServiceImpl implements EmailCodeService {
         if (!matched) {
             // ② 失败计量：1 小时窗口累计，达阈值即写入固定 30 分钟锁定
             recordVerifyFailure(normalized, failKey);
-            log.warn("验证码校验失败: email={}, 原因={}", maskEmail(normalized),
-                    cached == null ? "验证码不存在或已过期" : "验证码不匹配");
+            log.warn("验证码校验失败: email={}, scene={}, 原因={}", maskEmail(normalized), normalizedScene,
+                    cached == null ? "验证码不存在或已过期（含 scene 不匹配）" : "验证码不匹配");
             throw new BusinessException(ErrorCode.EMAIL_CODE_ERROR);
         }
 
@@ -165,6 +167,26 @@ public class EmailCodeServiceImpl implements EmailCodeService {
     }
 
     // ------------------------------------------------------------------ 内部实现
+
+    /**
+     * 场景归一化（批次 6.0.6 · Minor 6）：去空白 + 转大写；空值/无法识别统一落到
+     * {@link EmailCodeService#SCENE_DEFAULT}。
+     *
+     * <p>为什么必须归一而不是"原样拼 Key"：{@code scene} 是查询参数，
+     * 取码时传 {@code register}、用码时传 {@code REGISTER} 会拼出两个不同的 Key，
+     * 表现为"刚拿到的码立刻校验失败"——那种 bug 极难排查。归一之后大小写不敏感。</p>
+     *
+     * <p>为什么不校验白名单（只认三个已知场景）：换绑/找回归属在<b>业务层</b>由
+     * 各自的接口决定传什么 scene，而 email-code 接口本身对游客开放；
+     * 这里保持"任意 scene 都能取码、但只能被同一个 scene 用掉"的语义最直观，
+     * 也不需要给接口新增一个"未知场景"错误码。</p>
+     */
+    private static String normalizeScene(String scene) {
+        if (scene == null || scene.isBlank()) {
+            return EmailCodeService.SCENE_DEFAULT;
+        }
+        return scene.trim().toUpperCase(Locale.ROOT);
+    }
 
     /**
      * 邮箱校验：先格式（102），再校园后缀允许列表（102，后缀来自配置，严禁硬编码）。

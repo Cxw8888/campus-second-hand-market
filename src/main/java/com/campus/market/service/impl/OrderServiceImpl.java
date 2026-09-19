@@ -25,6 +25,7 @@ import com.campus.market.service.OrderService;
 import com.campus.market.service.OrderTokenService;
 import com.campus.market.service.PayCallbackSignService;
 import com.campus.market.service.StockService;
+import com.campus.market.util.TransactionHelper;
 import com.campus.market.vo.OrderCreateVO;
 import com.campus.market.vo.OrderTokenVO;
 import com.campus.market.vo.OrderVO;
@@ -176,20 +177,26 @@ public class OrderServiceImpl implements OrderService {
             throw new BusinessException(ErrorCode.PARAM_ERROR, PayCallbackSignService.VERIFY_FAILED_MSG);
         }
 
-        // ③ 幂等：order_no + 回调流水号 去重，重复回调直接返回成功
-        //    ⚠️ 必须在验签之后才写去重键：否则未通过验签的请求会先占位，
-        //    把随后到达的合法回调当成"重复回调"吞掉（自审报告 Minor 9 同源问题）。
+        // ③ 幂等：order_no + 回调流水号 去重。
+        //
+        //    ⚠️ 两条历史教训叠在这里，缺一条都会出问题：
+        //    ①（6.0.2）去重<b>必须在验签之后</b>：否则未通过验签的请求会先占位，
+        //      把随后到达的合法回调当成"重复回调"吞掉；
+        //    ②（6.0.6 · Minor 9）去重键的<b>写入必须在事务提交之后</b>：
+        //      修前在事务内 SETNX，事务一旦回滚（后续状态机抛异常 / DB 抖动），
+        //      Key 已经占位而状态没变 —— 支付方按幂等重试同一笔流水，
+        //      会被当成"重复回调"直接 return false，<b>这笔支付永久丢失</b>且不报错。
+        //      现在：读侧在事务内判定（快路径），写侧走 TransactionHelper.runAfterCommit；
+        //      并发穿透由状态机兜底 —— pay 的 `WHERE status = 0` 保证只有一次能生效。
         String dedupKey = RedisKeys.PAY_CALLBACK_PREFIX + orderNo + ":" + tradeNo;
-        Boolean first = null;
         try {
-            first = redisTemplate.opsForValue().setIfAbsent(dedupKey, "1", Duration.ofDays(7));
+            if (Boolean.TRUE.equals(redisTemplate.hasKey(dedupKey))) {
+                log.info("支付回调重复, 已忽略: orderNo={}, tradeNo={}", orderNo, tradeNo);
+                return false;
+            }
         } catch (Exception e) {
             // Redis 故障降级：无法去重时继续走状态机（状态机本身幂等，重复回调不会造成二次扣减）
             log.warn("支付回调去重校验降级: orderNo={}, err={}", orderNo, e.getMessage());
-        }
-        if (Boolean.FALSE.equals(first)) {
-            log.info("支付回调重复, 已忽略: orderNo={}, tradeNo={}", orderNo, tradeNo);
-            return false;
         }
 
         if (order.getStatus() != null && order.getStatus() == OrderStatus.PAID) {
@@ -202,6 +209,18 @@ public class OrderServiceImpl implements OrderService {
             log.warn("支付回调状态冲突, 已忽略: orderNo={}, status={}", orderNo, order.getStatus());
             return false;
         }
+
+        // ③-b 事务提交后才落去重键：回滚不留下"占位但没生效"的键（Minor 9）
+        TransactionHelper.runAfterCommit(() -> {
+            try {
+                redisTemplate.opsForValue().set(dedupKey, "1", Duration.ofDays(7));
+            } catch (Exception e) {
+                // 写失败只影响"后续重复回调的去重"，状态机仍能兜住重复调用
+                log.warn("支付回调去重键写入失败（降级，靠状态机兜底）: orderNo={}, err={}",
+                        orderNo, e.getMessage());
+            }
+        });
+
         notificationSender.sendAsync(order.getSellerId(), NOTIFICATION_TYPE_ORDER, BIZ_TYPE_ORDER, order.getId(),
                 "买家已支付订单「" + order.getProductTitle() + "」，请尽快发货或约定面交");
         log.info("支付回调验签通过并完成支付: orderNo={}, tradeNo={}, orderId={}", orderNo, tradeNo, order.getId());

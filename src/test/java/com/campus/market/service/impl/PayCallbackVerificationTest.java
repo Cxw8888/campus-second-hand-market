@@ -103,6 +103,8 @@ class PayCallbackVerificationTest {
 
         when(redisTemplate.opsForValue()).thenReturn(valueOperations);
         when(valueOperations.setIfAbsent(anyString(), anyString(), any(Duration.class))).thenReturn(Boolean.TRUE);
+        // 批次 6.0.6 · Minor 9：去重改为"读侧判定（hasKey）+ 写侧在提交后落键"
+        when(redisTemplate.hasKey(anyString())).thenReturn(false);
     }
 
     private PayCallbackRequest request(Long timestamp, String sign) {
@@ -198,8 +200,38 @@ class PayCallbackVerificationTest {
         verify(orderMapper).pay(ORDER_ID);
         // 状态真的变了才发通知（"买家已支付，请尽快发货"）
         verify(notificationSender).sendAsync(any(), any(), any(), any(), anyString());
-        // 去重键在验签通过之后才写
-        verify(valueOperations).setIfAbsent("pay:callback:" + ORDER_NO + ":" + TRADE_NO, "1", Duration.ofDays(7));
+        // 去重键在验签通过、状态机生效之后才写（批次 6.0.6 · Minor 9：写侧改到 runAfterCommit）
+        verify(valueOperations).set("pay:callback:" + ORDER_NO + ":" + TRADE_NO, "1", Duration.ofDays(7));
+    }
+
+    @Test
+    @DisplayName("⑥ 去重键已存在（同一笔流水的重复回调）→ 返回 false 且不再改状态（Minor 9 读侧）")
+    void duplicateCallbackIsIgnoredWithoutTouchingStateMachine() {
+        long now = System.currentTimeMillis();
+        when(orderMapper.selectOne(any())).thenReturn(pendingOrder());
+        when(redisTemplate.hasKey("pay:callback:" + ORDER_NO + ":" + TRADE_NO)).thenReturn(true);
+
+        boolean processed = orderService.handlePayCallback(request(now, sign(ORDER_NO, TRADE_NO, now)));
+
+        assertThat(processed).as("重复回调返回 false（不是异常）").isFalse();
+        verify(orderMapper, never()).pay(any());
+        verify(notificationSender, never()).sendAsync(any(), any(), any(), any(), anyString());
+    }
+
+    @Test
+    @DisplayName("⑦ ★Minor 9：状态机失败（事务要回滚）→ 去重键绝不落 Redis，同一笔流水可安全重试")
+    void dedupKeyIsNotWrittenWhenStateMachineFails() {
+        long now = System.currentTimeMillis();
+        when(orderMapper.selectOne(any())).thenReturn(pendingOrder());
+        // 模拟事务内后续步骤失败（DB 抖动 / 约束冲突）→ 事务将回滚
+        when(orderMapper.pay(ORDER_ID)).thenThrow(new IllegalStateException("模拟事务内失败"));
+
+        assertThatThrownBy(() -> orderService.handlePayCallback(request(now, sign(ORDER_NO, TRADE_NO, now))))
+                .isInstanceOf(IllegalStateException.class);
+
+        // 核心断言：修前这里是"键已占位、状态没变"——支付方重试同一笔流水会被永久吞掉
+        verify(valueOperations, never()).set(anyString(), anyString(), any(Duration.class));
+        verify(valueOperations, never()).setIfAbsent(anyString(), anyString(), any(Duration.class));
     }
 
     @Test

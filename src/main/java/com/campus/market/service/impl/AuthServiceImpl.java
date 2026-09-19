@@ -102,7 +102,8 @@ public class AuthServiceImpl implements AuthService {
     @Transactional(rollbackFor = Exception.class)
     public Long register(RegisterRequest request) {
         // ① 校验校园邮箱验证码（格式 / 后缀 / 限流 / 锁定 / 一次性消费均在 EmailCodeService 内处理）
-        emailCodeService.verify(request.getEmail(), request.getEmailCode());
+        //    scene 必须与取码时一致（批次 6.0.6 · Minor 6：验证码按 scene 隔离）
+        emailCodeService.verify(request.getEmail(), EmailCodeService.SCENE_REGISTER, request.getEmailCode());
 
         // ② 强密码校验（8-20 位 + 字母 + 数字 + 特殊字符 + 非弱密码），不合规 → code=100
         PasswordValidator.validate(request.getPassword());
@@ -236,7 +237,8 @@ public class AuthServiceImpl implements AuthService {
         String email = normalizeEmail(request.getEmail());
 
         // ① 校验验证码（失败/过期 103；邮箱验证码服务锁定 107）
-        emailCodeService.verify(email, request.getEmailCode());
+        //    scene=RESET_PASSWORD（批次 6.0.6 · Minor 6）：注册场景的码不能用于找回密码
+        emailCodeService.verify(email, EmailCodeService.SCENE_RESET_PASSWORD, request.getEmailCode());
 
         User user = findByEmail(email);
         if (user == null) {

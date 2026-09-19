@@ -96,9 +96,13 @@ public interface OrderMapper extends BaseMapper<Order> {
     int forceRefund(@Param("id") Long id, @Param("reason") String reason);
 
     /**
-     * 用户封禁冻结订单（0/1/2/6→5）：SQL 条件括号不可省略，调用方需同步回补库存。
+     * 用户封禁冻结订单（0/1/2/6/7→5）：SQL 条件括号不可省略，调用方<b>不回补</b>库存（回补只发生在 5→4）。
+     *
+     * <p><b>批次 6.0.6 · Minor 2</b>：补上 {@code 7}（退款被拒 / 申诉期）。修前 7 不在集合里，
+     * 被封禁用户"退款被拒"的订单不会被冻结，3 天后 {@code recoverFromRefundRejected}
+     * 仍会把它自动恢复成 1/2 继续流转 —— 等于封禁对这类订单完全无效。</p>
      */
-    @Update("UPDATE tb_order SET status = 5 WHERE (seller_id = #{userId} OR user_id = #{userId}) AND status IN (0,1,2,6) AND is_deleted = 0")
+    @Update("UPDATE tb_order SET status = 5 WHERE (seller_id = #{userId} OR user_id = #{userId}) AND status IN (0,1,2,6,7) AND is_deleted = 0")
     int freezeByUser(@Param("userId") Long userId);
 
     /**
@@ -151,10 +155,26 @@ public interface OrderMapper extends BaseMapper<Order> {
     int recoverFromRefundRejected();
 
     /**
-     * 定时任务取数：查询超过指定分钟数仍未支付的订单（0-待支付不参与冻结，可被超时取消）。
+     * 定时任务取数：查询超过阈值仍未支付的订单（0-待支付）。
+     *
+     * <p><b>批次 6.0.6 · Minor 3</b>：阈值<b>按交易方式分开</b>。修前只有一条 {@code 15 分钟} 规则，
+     * 而校园面交是"约时间见面"——买家 15 分钟没点支付就被系统取消，与真实场景严重不符
+     * （约在三食堂门口，走过去可能就要 10 分钟）。现在：</p>
+     * <ul>
+     *   <li>邮寄单（{@code trade_type IN (2,3)}）：{@code mailMinutes}（默认 15 分钟，保持原行为）；</li>
+     *   <li>面交单（{@code trade_type = 1}）：{@code faceMinutes}（默认 120 分钟 = 2 小时）。</li>
+     * </ul>
+     * <p>两个阈值都来自 {@code app.task.timeout-cancel.*}（configuration 绑定，非硬编码）。
+     * 用一条 {@code OR} 查询而不是两次查询：保持"单批统一 LIMIT"的语义，
+     * 避免面交单的宽窗口把邮寄单的取数名额挤掉。</p>
      */
-    @Select("SELECT * FROM tb_order WHERE status = 0 AND is_deleted = 0 AND create_time < NOW() - INTERVAL #{minutes} MINUTE ORDER BY create_time ASC LIMIT #{limit}")
-    List<Order> selectTimeoutPendingOrders(@Param("minutes") Integer minutes, @Param("limit") Integer limit);
+    @Select("SELECT * FROM tb_order WHERE status = 0 AND is_deleted = 0 AND ("
+            + "(trade_type IN (2,3) AND create_time < NOW() - INTERVAL #{mailMinutes} MINUTE) OR "
+            + "(trade_type = 1 AND create_time < NOW() - INTERVAL #{faceMinutes} MINUTE)"
+            + ") ORDER BY create_time ASC LIMIT #{limit}")
+    List<Order> selectTimeoutPendingOrders(@Param("mailMinutes") Integer mailMinutes,
+                                           @Param("faceMinutes") Integer faceMinutes,
+                                           @Param("limit") Integer limit);
 
     /**
      * 定时任务取数：处于自动确认收货提醒窗口内的订单。

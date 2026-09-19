@@ -86,9 +86,9 @@ class EmailCodeServiceSkipTest {
 
         // ② 返回的验证码必须真的落在 Redis 里，且与响应一致——
         //    否则前端拿着这个码去注册会在 verify() 阶段失败
-        String cached = redisTemplate.opsForValue().get(RedisKeys.emailCode(EMAIL));
+        String cached = redisTemplate.opsForValue().get(RedisKeys.emailCode(SCENE, EMAIL));
         assertThat(cached)
-                .as("email:code:%s 应已写入，且与响应返回的验证码一致", EMAIL)
+                .as("email:code:%s:%s 应已写入，且与响应返回的验证码一致", SCENE, EMAIL)
                 .isEqualTo(vo.getCode());
 
         // ③ 核心断言：降级模式绝不能碰 SMTP
@@ -100,7 +100,7 @@ class EmailCodeServiceSkipTest {
      */
     private void clearRedisKeys() {
         redisTemplate.delete(List.of(
-                RedisKeys.emailCode(EMAIL),
+                RedisKeys.emailCode(SCENE, EMAIL),
                 RedisKeys.emailLimit(EMAIL),
                 RedisKeys.emailFail(EMAIL),
                 RedisKeys.emailLock(EMAIL)));

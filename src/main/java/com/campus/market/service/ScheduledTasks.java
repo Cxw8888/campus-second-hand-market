@@ -66,6 +66,10 @@ public class ScheduledTasks {
     /**
      * 超时未支付自动取消（0→4）+ 库存回补，每 1 分钟扫描一次。
      *
+     * <p><b>阈值按交易方式区分</b>（批次 6.0.6 · Minor 3）：邮寄 {@code minutes}（默认 15 分钟）、
+     * 面交 {@code face-minutes}（默认 120 分钟）。修前两者共用 15 分钟，
+     * 面交单（约见面）常在买家赶路途中被系统取消。</p>
+     *
      * <p><b>刻意不加 {@code @Transactional}</b>：整批一个事务时，批内一单失败会连带回滚另外 199 单
      * （而通知可能已经发出）。逐单事务见 {@link OrderTaskProcessor}。</p>
      */
@@ -75,7 +79,8 @@ public class ScheduledTasks {
             lockAtLeastFor = "PT30S")
     public void cancelTimeoutOrders() {
         TaskProperties.TimeoutCancel config = taskProperties.getTimeoutCancel();
-        List<Order> timeoutOrders = orderMapper.selectTimeoutPendingOrders(config.getMinutes(), config.getBatchLimit());
+        List<Order> timeoutOrders = orderMapper.selectTimeoutPendingOrders(
+                config.getMinutes(), config.getFaceMinutes(), config.getBatchLimit());
         if (timeoutOrders.isEmpty()) {
             return;
         }
