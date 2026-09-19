@@ -1,6 +1,6 @@
 # 校园二手交易平台 · 后端骨架（V26 对齐）
 
-Java 17 + Spring Boot 3 + MyBatis-Plus + MySQL 8.0 + Redis + Flyway + ShedLock。
+Java 21 + Spring Boot 3 + MyBatis-Plus + MySQL 8.0 + Redis + Flyway + ShedLock。
 统一包名 `com.campus.market`，接口统一前缀 `/api/v1/`。
 
 ---
