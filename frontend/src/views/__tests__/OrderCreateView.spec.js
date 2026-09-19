@@ -182,3 +182,85 @@ describe('OrderCreateView 提交订单防连点', () => {
     expect(dialogCount()).toBe(1)
   })
 })
+
+/**
+ * 下单成功提示里的支付窗口（批次 6.0.7）
+ *
+ * 后端 6.0.6 起窗口按**订单快照的 trade_type** 分档（面交 120 分钟 / 邮寄 15 分钟）。
+ * 下单页原来写死「请在 15 分钟内完成支付」⇒ 面交单会被告知错误的时限。
+ * 提示文案取的是**商品维度**的 tradeType（订单快照也取商品维度，tradeType=3 的订单快照仍是 3）。
+ */
+describe('OrderCreateView 下单成功提示按 trade_type 分档', () => {
+  async function submitOnce() {
+    const wrapper = await mountPage()
+    // 邮寄单（tradeType=2）必须填收货地址，否则 el-form 校验失败、确认弹窗根本不会出现
+    // （tradeType=3 默认选「面交」，不需要地址）
+    const addressInput = wrapper.find('textarea')
+    if (addressInput.exists()) {
+      await addressInput.setValue('1 号宿舍楼 101 室')
+      await flushPromises()
+    }
+    await wrapper.find('.order-create__submit').trigger('click')
+    await flushPromises()
+    document.querySelector('.el-message-box__btns .el-button--primary').click()
+    await flushPromises()
+    await flushPromises()
+    await new Promise((r) => setTimeout(r, 60)) // 等 ElMessage 渲染
+    return document.querySelector('.el-message')?.textContent || ''
+  }
+
+  beforeEach(() => {
+    globalThis.ResizeObserver = ResizeObserverStub
+    document.body.innerHTML = ''
+    vi.clearAllMocks()
+    getOrderTokenMock.mockResolvedValue({ token: 'fresh-token', expireSeconds: 300 })
+    createOrderMock.mockResolvedValue({ orderId: '99', orderNo: '123', amount: 45, status: 0 })
+  })
+
+  afterEach(() => {
+    document.body.innerHTML = ''
+  })
+
+  function stubProductWithTradeType(tradeType) {
+    productDetail.mockResolvedValue({
+      id: '30',
+      title: '考研数学复习全书 九成新',
+      price: 45,
+      stock: 3,
+      conditionLevel: 2,
+      tradeType,
+      tradeLocation: '图书馆一楼大厅',
+      coverImage: '',
+      imageUrls: [],
+      status: 1,
+      sellerId: '26',
+      createTime: '2026-09-16 16:03:43'
+    })
+  }
+
+  it('商品 tradeType=1（仅面交）→ 提示「请在 120 分钟内完成支付」', async () => {
+    stubProductWithTradeType(1)
+
+    const msgText = await submitOnce()
+
+    expect(msgText).toContain('下单成功')
+    expect(msgText).toContain('请在 120 分钟内完成支付')
+    expect(msgText).not.toContain('请在 15 分钟内完成支付')
+  })
+
+  it('商品 tradeType=2（仅邮寄）→ 提示「请在 15 分钟内完成支付」', async () => {
+    stubProductWithTradeType(2)
+
+    const msgText = await submitOnce()
+
+    expect(msgText).toContain('请在 15 分钟内完成支付')
+  })
+
+  it('商品 tradeType=3（面交/邮寄皆可）→ 与邮寄同档，提示 15 分钟（订单快照也是 3）', async () => {
+    stubProductWithTradeType(3)
+
+    const msgText = await submitOnce()
+
+    expect(msgText).toContain('请在 15 分钟内完成支付')
+  })
+})

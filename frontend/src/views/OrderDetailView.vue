@@ -83,7 +83,7 @@ const isPending = computed(() => status.value === 0)
 
 const amount = computed(() => formatPrice(order.value?.amount))
 const unitPrice = computed(() => formatPrice(order.value?.productPrice))
-const hint = computed(() => orderStatusHint(status.value))
+const hint = computed(() => orderStatusHint(status.value, tradeType.value))
 
 /** 交易信息行：面交显示约定地点，邮寄显示收货地址（都来自订单的 address 字段） */
 const placeLabel = computed(() => (isFace.value ? '面交地点' : '收货地址'))
@@ -454,7 +454,8 @@ onMounted(() => reloadAll(true))
         <div class="order-detail__head-right">
           <div v-if="isPending" class="order-detail__countdown">
             <el-icon :size="14"><Clock /></el-icon>
-            <PayCountdown :create-time="order.createTime" @expire="handleExpire" />
+            <!-- 待支付窗口按订单 trade_type 分档：面交 120 分钟 / 邮寄 15 分钟（批次 6.0.7） -->
+            <PayCountdown :create-time="order.createTime" :trade-type="tradeType" @expire="handleExpire" />
           </div>
           <p v-else-if="hint" class="order-detail__hint">{{ hint }}</p>
         </div>

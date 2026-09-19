@@ -17,7 +17,7 @@ import OrderStatusTag from '@/components/OrderStatusTag.vue'
 import PayCountdown from '@/components/PayCountdown.vue'
 import { getOrderDetail, payOrder } from '@/api/order'
 import { formatPrice } from '@/utils/format'
-import { orderStatusHint } from '@/utils/constants'
+import { orderStatusHint, payTimeoutExpiredHint, payTimeoutHint, payTimeoutMinutes } from '@/utils/constants'
 
 const route = useRoute()
 const router = useRouter()
@@ -32,7 +32,12 @@ const amount = computed(() => formatPrice(order.value?.amount))
 const status = computed(() => Number(order.value?.status))
 const isPending = computed(() => status.value === 0)
 const isCancelled = computed(() => status.value === 4)
-const hint = computed(() => orderStatusHint(status.value))
+/**
+ * 订单快照的 trade_type（OrderVO 已返回，随 getOrderDetail 一起来，不需要额外请求）。
+ * 待支付窗口按它分档：面交 120 分钟 / 邮寄 15 分钟（批次 6.0.7）。
+ */
+const tradeType = computed(() => order.value?.tradeType)
+const hint = computed(() => orderStatusHint(status.value, tradeType.value))
 
 async function loadOrder() {
   try {
@@ -49,7 +54,7 @@ async function loadOrder() {
 async function handleExpire() {
   await loadOrder()
   if (Number(order.value?.status) === 4) {
-    ElMessage.warning('订单已超过 15 分钟未支付，已被系统自动取消')
+    ElMessage.warning(`${payTimeoutExpiredHint(tradeType.value)}，订单已被系统自动取消`)
   }
 }
 
@@ -121,7 +126,11 @@ onMounted(loadOrder)
         {{ isCancelled ? '订单已自动取消' : '下单成功' }}
       </h1>
       <p class="order-success__sub">
-        {{ isCancelled ? '超过 15 分钟未支付，库存已回补，可以重新下单' : '请在 15 分钟内完成支付，超时订单会自动取消' }}
+        {{
+          isCancelled
+            ? `${payTimeoutExpiredHint(tradeType)}，库存已回补，可以重新下单`
+            : payTimeoutHint(tradeType)
+        }}
       </p>
 
       <!-- 订单摘要 -->
@@ -148,9 +157,9 @@ onMounted(loadOrder)
         </div>
       </dl>
 
-      <!-- 倒计时：只在待支付时出现 -->
+      <!-- 倒计时：只在待支付时出现（窗口按订单 trade_type 分档：面交 120 分钟 / 邮寄 15 分钟） -->
       <div v-if="isPending" class="order-success__countdown">
-        <PayCountdown :create-time="order.createTime" @expire="handleExpire" />
+        <PayCountdown :create-time="order.createTime" :trade-type="tradeType" @expire="handleExpire" />
       </div>
       <p v-else-if="hint" class="order-success__hint">{{ hint }}</p>
 

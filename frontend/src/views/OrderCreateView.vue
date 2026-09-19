@@ -26,7 +26,7 @@ import TradeTypeTag from '@/components/TradeTypeTag.vue'
 import { getProductDetail } from '@/api/product'
 import { createOrder, getOrderToken } from '@/api/order'
 import { useUserStore } from '@/stores/user'
-import { CODE } from '@/utils/constants'
+import { CODE, payTimeoutHint } from '@/utils/constants'
 import { formatPrice } from '@/utils/format'
 
 const route = useRoute()
@@ -239,7 +239,10 @@ async function handleSubmit() {
       { silent: true }
     )
 
-    ElMessage.success('下单成功，请在 15 分钟内完成支付')
+    // 支付窗口按 trade_type 分档（批次 6.0.7）：面交 120 分钟 / 邮寄 15 分钟。
+    // 用【商品】维度的 tradeType 而不是上面的 effectiveTrade：订单快照取的是商品维度
+    // （tradeType=3 的订单快照也是 3，后端按 IN (2,3) 走 15 分钟档），两者可能不同。
+    ElMessage.success(`下单成功，${payTimeoutHint(productTradeType.value)}`)
     // replace：避免用户点浏览器返回又回到下单页重复提交
     router.replace({ name: 'order-success', params: { orderId: String(data.orderId) } })
   } catch (error) {

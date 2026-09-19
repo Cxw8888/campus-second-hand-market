@@ -29,7 +29,8 @@ const amount = computed(() => formatPrice(props.order.amount))
 const unitPrice = computed(() => formatPrice(props.order.productPrice))
 const relativeTime = computed(() => formatRelativeTime(props.order.createTime))
 const absoluteTime = computed(() => formatDate(props.order.createTime))
-const hint = computed(() => orderStatusHint(props.order.status))
+/** 状态提示：待支付时按订单 trade_type 给出正确窗口（面交 120 分钟 / 邮寄 15 分钟），批次 6.0.7 */
+const hint = computed(() => orderStatusHint(props.order.status, props.order.tradeType))
 /** 商品被逻辑删除时后端会给 productDeleted=true，此时只展示快照、不给跳商品详情 */
 const productDeleted = computed(() => Boolean(props.order.productDeleted))
 

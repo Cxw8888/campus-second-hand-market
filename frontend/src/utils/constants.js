@@ -46,14 +46,47 @@ export const MY_PRODUCT_TABS = [
 ]
 
 /**
- * 待支付订单的超时时间（分钟）。
+ * 待支付订单的超时取消窗口（分钟）—— **后端事实**在前端的镜像。
  *
- * ⚠️ 这是后端定时任务的配置值，前端只是镜像一份用于倒计时展示：
- *   application.yml → app.task.timeout-cancel.minutes: 15
- *   后端 ScheduledTasks.cancelTimeoutOrders 每分钟扫一次，把 status=0 且创建超过 15 分钟的订单
- *   自动置为 4-已取消 并回补库存。改了后端配置，这里也要跟着改。
+ * 后端（批次 6.0.6 · Minor 3 起）按**订单快照**的 trade_type 分档：
+ *   trade_type = 1（仅面交）        → app.task.timeout-cancel.face-minutes，默认 120
+ *   trade_type IN (2,3)（邮寄/皆可）→ app.task.timeout-cancel.minutes，默认 15
+ * 后端 ScheduledTasks.cancelTimeoutOrders 每分钟扫一次，把 status=0 且超过窗口的订单置为
+ * 4-已取消 并回补库存。**改了后端配置，这两个常量要跟着改。**
+ *
+ * ⚠️ 前端只是展示镜像，真正的取消动作永远由后端定时任务执行 —— 前端不做任何状态推进，
+ *    判断"到底有没有超时"一律以后端返回的 status 为准。
  */
-export const PAY_TIMEOUT_MINUTES = 15
+export const PAY_TIMEOUT_MAIL_MINUTES = 15
+export const PAY_TIMEOUT_FACE_MINUTES = 120
+
+/**
+ * @deprecated 仅为兼容既有引用保留（等于邮寄窗口 15 分钟）。
+ *
+ * 新代码请用 {@link payTimeoutMinutes}：面交单的窗口是 120 分钟，
+ * 直接用本常量会把面交单的倒计时/文案算成 15 分钟 —— 6.0.7 修的正是这个 bug。
+ */
+export const PAY_TIMEOUT_MINUTES = PAY_TIMEOUT_MAIL_MINUTES
+
+/**
+ * 按订单快照的 trade_type 返回待支付超时分钟数。
+ *
+ * @param {number|string} tradeType 1=仅面交（120 分钟）；2=仅邮寄 / 3=面交邮寄皆可（15 分钟，与后端 IN (2,3) 一致）
+ * @returns {number} 超时分钟数（未知/未提供时按邮寄档 15 分钟兜底）
+ */
+export function payTimeoutMinutes(tradeType) {
+  return Number(tradeType) === 1 ? PAY_TIMEOUT_FACE_MINUTES : PAY_TIMEOUT_MAIL_MINUTES
+}
+
+/** 待支付提示文案（按 trade_type 给出具体分钟数）：如「请在 120 分钟内完成支付，超时将自动取消」 */
+export function payTimeoutHint(tradeType) {
+  return `请在 ${payTimeoutMinutes(tradeType)} 分钟内完成支付，超时将自动取消`
+}
+
+/** 已超时文案（按 trade_type 给出具体分钟数）：如「超过 15 分钟未支付」 */
+export function payTimeoutExpiredHint(tradeType) {
+  return `超过 ${payTimeoutMinutes(tradeType)} 分钟未支付`
+}
 
 // ------------------------------------------------------------------ 分类
 /**
@@ -263,9 +296,13 @@ export function parseSort(value) {
  *   4 已取消 = 灰      5 已冻结 = 灰(带锁) 6 退款申请中 = 黄   7 退款被拒 = 深橙
  *
  * actionHint 用于列表/详情页给出「下一步能做什么」的提示文案。
+ *
+ * ⚠️ 待支付（0）的文案**刻意不带具体分钟数**：窗口随订单 trade_type 变化（面交 120 / 邮寄 15），
+ *    写在字典里必然有一边是错的（6.0.7 之前就写着"15 分钟"，面交单显示错误）。
+ *    需要带分钟数时用 {@link orderStatusHint}(status, tradeType)。
  */
 export const ORDER_STATUS_MAP = {
-  0: { label: '待支付', tone: 'orange', icon: '', actionHint: '请在 15 分钟内完成支付，超时将自动取消' },
+  0: { label: '待支付', tone: 'orange', icon: '', actionHint: '请在支付时限内完成支付，超时将自动取消' },
   1: { label: '已支付待发货', tone: 'blue', icon: '', actionHint: '等待卖家发货或约定面交' },
   2: { label: '已发货待收货', tone: 'purple', icon: '', actionHint: '收到货后请及时确认收货' },
   3: { label: '已完成', tone: 'green', icon: '', actionHint: '交易已完成，感谢使用' },
@@ -283,7 +320,17 @@ export function orderStatusTone(status) {
   return ORDER_STATUS_MAP[Number(status)]?.tone ?? 'gray'
 }
 
-export function orderStatusHint(status) {
+/**
+ * 订单状态提示文案。
+ *
+ * @param {number|string} status 订单状态
+ * @param {number|string} [tradeType] 订单快照的 trade_type：给了它就按它算出待支付的具体分钟数
+ *        （面交 120 / 邮寄 15）；不给则退回字典里的**通用文案**（不带分钟数，避免显示错误数字）。
+ */
+export function orderStatusHint(status, tradeType) {
+  if (Number(status) === 0 && tradeType !== undefined && tradeType !== null && tradeType !== '') {
+    return payTimeoutHint(tradeType)
+  }
   return ORDER_STATUS_MAP[Number(status)]?.actionHint ?? ''
 }
 
