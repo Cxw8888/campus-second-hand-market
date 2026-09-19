@@ -59,8 +59,9 @@ public class ScheduledTasks {
             // 影响行数判断：并发下可能已被买家支付/取消，为 0 直接跳过
             int rows = orderMapper.cancelByTimeout(order.getId());
             if (rows > 0) {
-                // 库存回补必须与订单状态更新同一事务（场景 ②）
-                stockService.restore(order.getProductId(), order.getQuantity());
+                // 库存回补必须与订单状态更新同一事务（场景 ②）；
+                // 批次 6.0.3 · B1：带幂等凭证（order:restored:{orderId}），避免与其它路径重复回补
+                stockService.restoreOnce(order.getId(), order.getProductId(), order.getQuantity());
                 cancelled++;
                 notificationSender.sendAsync(order.getUserId(), TYPE_ORDER, BIZ_TYPE_ORDER, order.getId(),
                         "订单「" + order.getProductTitle() + "」超时未支付，已自动取消");

@@ -72,6 +72,12 @@ class OrderConcurrencyTest {
     /**
      * 合成 ID：tb_product / tb_order 在 V1__init.sql 里没有外键约束，直接写合成 ID 即可，
      * 不会碰到你原有的验收数据（真实数据里 id 才到两位数）。
+     *
+     * <p><b>批次 6.0.3 · B2 起，卖家必须是一条真实存在的用户行</b>：
+     * 下单时新增了"卖家 status=0（正常）"的校验（封禁卖家不得被下单）。
+     * 因此本用例在 {@code setUp} 里用同一个合成 ID 造一条 tb_user 卖家行，
+     * 并在 {@code tearDown} 里物理删除 —— 否则 1000 个线程会全部被 204 拒绝，
+     * 压测直接失去意义。买家不需要用户行：它只出现在 UserContext 与 Redis 防重 Token 里。</p>
      */
     private static final long SELLER_ID = 9_100_001L;
     private static final long BUYER_ID = 9_100_002L;
@@ -107,6 +113,11 @@ class OrderConcurrencyTest {
 
     @BeforeEach
     void setUp() {
+        // ⓪ 造卖家用户（合成 ID，status=0 正常）：批次 6.0.3 · B2 起下单会校验卖家状态
+        jdbcTemplate.update("DELETE FROM tb_user WHERE id = ?", SELLER_ID);
+        jdbcTemplate.update("INSERT INTO tb_user (id, username, password, nickname, role, status) "
+                + "VALUES (?, ?, ?, ?, 0, 0)", SELLER_ID, "concurrency_seller_9100001", "{noop}test-only", "并发测试卖家");
+
         // ① 造商品：stock=1、status=1（上架）、trade_type=1（面交，省掉邮寄地址校验）
         Product product = new Product();
         product.setUserId(SELLER_ID);
@@ -144,6 +155,8 @@ class OrderConcurrencyTest {
         }
         // 站内信（买家下单后给卖家的"有新订单"）同步落库了，一并物理清掉
         jdbcTemplate.update("DELETE FROM tb_notification WHERE user_id = ?", SELLER_ID);
+        // ⓪ 的合成卖家用户同样清理（B2 起它必须存在，故必须由本用例负责收尾）
+        jdbcTemplate.update("DELETE FROM tb_user WHERE id = ?", SELLER_ID);
 
         // 防重 Token：成功的那个已被 Lua 消费，其余 999 个仍是有效 Key，必须显式删除
         if (tokens != null) {

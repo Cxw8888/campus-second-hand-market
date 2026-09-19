@@ -391,3 +391,57 @@ d	prod 全配好 → 正常启动（18081）；/doc.html、/v3/api-docs、/swagg
 	可信代理命中时（app.security.trusted-proxies 含直连地址）才采信 XFF 链，且取最右侧不可信地址
 	账号大小写变体（Admin/admin/aDmIn/  ADMIN  ）四次失败全部累计到 login:fail:admin 同一个 Key
 
+===============================================================
+6.0.3 安全加固批测试结果（B1 库存回补幂等 + B2 封禁商品状态 + M7 剩余安全响应头）
+===============================================================
+测试时间	2026-09-19 14:19 ~ 14:28
+测试范围	B1（冻结/解冻双重回补）、B2（封禁后售罄商品重新上架）、M7 剩余（安全响应头）、
+	任务 E（报错文案 PowerShell 改 CSPRNG）、任务 F（文档同步）
+测试环境	Windows 11 / OpenJDK 21.0.12 / MySQL 8.0.46 / Redis 5.0.14 / Node v22.23.2
+	真机实例：dev @18080、prod @18081（均为本次代码 java -cp 直启）
+
+一、后端编译与单测
+命令	javac -parameters（155 个主源文件）+ 24 个测试类，JUnit Platform Launcher 运行（-Djdk.attach.allowAttachSelf=true）
+结果	141 / 141 通过（0 失败 0 跳过）；批次前 119，本批新增 22
+新增用例	22 个（4 个新测试类）：
+	StockRestoreIdempotencyTest 8（B1 凭证时序：抢占/跳过/未命中释放/Redis 降级/事务回滚释放/缺订单ID拒绝/参数回归/deduct 回归）
+	AdminBanUnfreezeStockTest 5（B1+B2 链路：封禁不回补、解冻 CANCEL 恰一次、解冻 COMPLETE 不回补、重复解冻 209、解封不自动上架）
+	OrderCreateSellerStatusTest 4（B2：封禁卖家 204 且不扣库存、卖家不存在 204、正常卖家成功、商品非在售先拦）
+	SecurityHeadersFilterTest 5（dev 仅基础头、prod+HTTP 有 CSP 无 HSTS、prod+HTTPS 有 HSTS、开关、FilterChain 继续）
+适配	OrderConcurrencyTest 因 B2 的"下单校验卖家 status"改了前置：改为在 setUp/tearDown 建删一条合成卖家用户
+	（旧注释写"tb_product 无外键，合成 ID 即可"，B2 起卖家必须真实存在，否则 1000 线程全被 204 拒绝）
+
+二、6 个真机场景（dev @18080，全部通过真实 HTTP API + MySQL 直查核对，测试数据已清理）
+	场景	操作	实测结果
+	a	商品(stock=0,status=2) + 订单(status=0) → 封禁卖家	库存仍为 0（B1：封禁不回补，修前会变 1）；订单→5；用户→1
+	b	（解封后）商品 stock=0 + 订单 status=0 → 封禁 → 解冻 CANCEL	库存 0 → **1**（恰好 +1，修前会是 +2）；订单 5→4
+	b'	把该订单强行改回 status=5 再解冻 CANCEL 一次	订单再次 5→4（状态机被绕过）但库存**仍为 1** → `order:restored:{orderId}` 凭证生效
+	c	（解封后）商品 stock=0 + 订单 status=0 → 封禁 → 解冻 COMPLETE	库存仍为 0（货已线下交付，不回补）；订单 5→3
+	d	同场景 a 的商品状态	封禁前 status=2(售罄) → 封禁后 status=0(下架)，**不是 1-在售**（B2：不再被翻回上架）
+	e	封禁卖家后把商品强行置回 status=1，买家下单	**code=204「商品不存在或已下架」**，库存未被扣减（修前会成功下单）
+	补充	解封用户	用户 status→0；三件商品 status 全为 0（**不自动上架**，需卖家手动重新上架）
+
+三、安全响应头实测（dev 与 prod 各一次，curl/Invoke-WebRequest 读响应头）
+	dev @18080	X-Content-Type-Options: nosniff / X-Frame-Options: DENY / Referrer-Policy: strict-origin-when-cross-origin /
+			Permissions-Policy: camera=(), microphone=(), geolocation=()；**无** CSP、**无** HSTS
+			/doc.html 仍返回 200（1892 字节，knife4j 可用，未被 CSP 打掉）
+	prod @18081	上述四个基础头 + Content-Security-Policy: default-src 'self'; script-src 'self' 'unsafe-inline';
+			style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; object-src 'none';
+			frame-ancestors 'none'; base-uri 'self'；**无 HSTS**（该实例为 HTTP，request.isSecure()=false）
+	回归	prod 下 /doc.html 与 /v3/api-docs 仍为 code=100「请求的接口不存在」（6.0.2 文档封禁未被破坏）；
+		支付回调无签名仍为 code=100「回调签名校验失败」（6.0.2 验签未被破坏）
+
+四、前端门禁（本批未改动任何前端文件，作回归确认）
+命令	npx vitest run
+结果	17 个文件 / 177 个用例全绿（与 6.0.2 一致，无新增无回归）
+
+五、任务 E（报错文案 PowerShell 改 CSPRNG）实测
+	原命令	1..48 | ForEach-Object { Get-Random -Max 256 } —— 伪随机，非 CSPRNG（安全批自查发现）
+	新命令	[Convert]::ToBase64String([Security.Cryptography.RandomNumberGenerator]::GetBytes(48))
+	实测	本机 Windows PowerShell 5.1 下**报错**："[System.Security.Cryptography.RandomNumberGenerator]
+		does not contain a method named 'GetBytes'"（静态 GetBytes(int) 是 .NET Core 3.0 / PowerShell 7 才有）
+	处理	文案同时给出 5.1 兼容写法（RandomNumberGenerator::Create().GetBytes($b)，两版 PowerShell 均可用），
+		并把"必须含两行命令、且不得再出现 Get-Random"写成断言（JwtUtilsSecretValidationTest ⑧、
+		PayCallbackSignServiceGuardTest ⑤）
+
+

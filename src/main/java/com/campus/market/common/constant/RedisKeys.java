@@ -65,6 +65,19 @@ public final class RedisKeys {
     public static final String PAY_CALLBACK_PREFIX = "pay:callback:";
 
     /**
+     * 库存回补幂等凭证（批次 6.0.3 · B1）。
+     *
+     * <p>为什么需要它：库存回补是"加法"，加两次就是库存失真（B1 的 5→4 与封禁双重回补，
+     * 库存 1 的商品能被刷成 2、反复封禁解冻可以无限刷）。订单状态机的 SQL 前置条件只能保证
+     * "同一条流转不能发生两次"，挡不住"两条不同路径先后对同一订单回补"，
+     * 因此必须有一份<b>订单维度</b>的回补凭证。</p>
+     *
+     * <p>TTL 30 天：覆盖订单的全部生命周期（超时取消 15 分钟、自动确认 7 天、退款申诉 3 天），
+     * 过期后订单早已是终态，不会再触发回补。</p>
+     */
+    public static final String ORDER_RESTORED_PREFIX = "order:restored:";
+
+    /**
      * 管理端统计缓存前缀（批次 5.5.1）。
      *
      * <p><b>刻意与 {@code search:} 完全分开</b>：搜索缓存里存的是分页商品列表（含 user/order 维度），
@@ -138,6 +151,11 @@ public final class RedisKeys {
     /** product:detail:{productId} */
     public static String productDetail(Long productId) {
         return PRODUCT_DETAIL_PREFIX + productId;
+    }
+
+    /** order:restored:{orderId}（库存回补幂等凭证，TTL 30 天） */
+    public static String orderRestored(Long orderId) {
+        return ORDER_RESTORED_PREFIX + orderId;
     }
 
     /** admin:stats:overview */

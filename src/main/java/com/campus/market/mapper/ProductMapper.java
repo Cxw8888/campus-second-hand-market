@@ -136,11 +136,47 @@ public interface ProductMapper extends BaseMapper<Product> {
     int deductStock(@Param("id") Long id, @Param("quantity") Integer quantity);
 
     /**
-     * 库存回补（统一入口，CAS 风格）：售罄(2) 回补后自动恢复上架(1)。返回影响行数。
+     * 库存回补（统一入口，CAS 风格）：<b>只加库存，不改变商品状态</b>。返回影响行数。
+     *
+     * <p><b>批次 6.0.3 · B2 修改</b>：原 SQL 带 {@code status = CASE WHEN status = 2 THEN 1 ELSE status END}，
+     * 即"售罄回补后自动恢复上架"。这个副作用在封禁链路里变成了漏洞
+     * （自审报告 B2）：管理员封禁卖家时逐单回补，把<b>售罄</b>商品翻回<b>在售</b>，
+     * 于是被封禁卖家的商品又能被别人下单，封禁形同虚设。</p>
+     *
+     * <p>现在回补与"是否重新上架"彻底解耦：需要恢复在售的场景（取消/退款这类交易终止）
+     * 由 {@link #relistIfSoldOut(Long)} 在 StockService 里<b>显式</b>再走一步，
+     * 而封禁链路根本不回补，自然不会重新上架。</p>
      */
-    @Update("UPDATE tb_product SET stock = stock + #{quantity}, status = CASE WHEN status = 2 THEN 1 ELSE status END " +
+    @Update("UPDATE tb_product SET stock = stock + #{quantity} " +
             "WHERE id = #{id} AND is_deleted = 0")
     int restoreStock(@Param("id") Long id, @Param("quantity") Integer quantity);
+
+    /**
+     * 商品因订单售罄后重新上架（批次 6.0.3 · B2 新增）：仅在"当前是售罄(2) 且回补后仍有库存(&gt;0)"
+     * 时置为在售(1)。返回影响行数。
+     *
+     * <p><b>为什么单独一条 SQL 而不是并进 restoreStock</b>：两者是不同语义的两件事 ——
+     * "把库存加回去"与"这件商品是否重新可售"。并在一起就回到了 B2 的老问题：
+     * 任何一次回补都会顺带改状态，封禁链路（虽然已不回补）或未来新增的只加库存场景
+     * 都会被这个副作用误伤。<b>状态前置条件 status = 2 是关键保护</b>：
+     * 已下架(0) 的商品（管理员强制下架、封禁下架）回补后仍是下架，不会被这条 SQL 重新放出来。</p>
+     */
+    @Update("UPDATE tb_product SET status = 1 " +
+            "WHERE id = #{id} AND status = 2 AND stock > 0 AND is_deleted = 0")
+    int relistIfSoldOut(@Param("id") Long id);
+
+    /**
+     * 封禁用户时批量下架其<b>可售商品</b>（批次 6.0.3 · B2 新增）：
+     * {@code status IN (1,2)} —— 在售(1) <b>与售罄(2)</b> 都要下架。
+     *
+     * <p>修前只命中 {@code status = 1}，售罄商品(2) 逃过下架；虽然当时紧接着的
+     * {@code restoreStock} 会把它翻回在售（所以最终能看到 <i>状态=1</i> 的假象），
+     * 但只要回补链路被修正（B1 已把封禁改为不回补），漏掉售罄商品就会直接留下
+     * "封禁后商品仍在架"的窟窿。两处必须一起修。</p>
+     */
+    @Update("UPDATE tb_product SET status = 0 " +
+            "WHERE user_id = #{userId} AND status IN (1,2) AND is_deleted = 0")
+    int offShelfByUser(@Param("userId") Long userId);
 
     /**
      * 绕过逻辑删除过滤的精确查询（订单回看已删除商品专用，自定义 SQL 为主方案）。

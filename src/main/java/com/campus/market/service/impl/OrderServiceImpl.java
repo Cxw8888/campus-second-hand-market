@@ -223,8 +223,9 @@ public class OrderServiceImpl implements OrderService {
         int rows = orderMapper.cancelByBuyer(id, userId, reason);
         ensureStateChanged(rows, order.getStatus(), OrderStatus.CANCELLED);
 
-        // 库存回补必须与订单状态更新同一事务（0→4 场景 ①）
-        stockService.restore(order.getProductId(), order.getQuantity());
+        // 库存回补必须与订单状态更新同一事务（0→4 场景 ①）；
+        // 批次 6.0.3 · B1：走带幂等凭证的 restoreOnce(orderId, ...)，防止同一订单被多条路径回补两次
+        stockService.restoreOnce(id, order.getProductId(), order.getQuantity());
 
         notificationSender.sendAsync(order.getSellerId(), NOTIFICATION_TYPE_ORDER, BIZ_TYPE_ORDER, id,
                 "买家已取消订单「" + order.getProductTitle() + "」");
@@ -330,8 +331,8 @@ public class OrderServiceImpl implements OrderService {
         int rows = orderMapper.agreeRefund(id, sellerId);
         ensureStateChanged(rows, order.getStatus(), OrderStatus.CANCELLED);
 
-        // 库存回补（场景 ④）
-        stockService.restore(order.getProductId(), order.getQuantity());
+        // 库存回补（场景 ④）；批次 6.0.3 · B1：带幂等凭证
+        stockService.restoreOnce(id, order.getProductId(), order.getQuantity());
 
         notificationSender.sendAsync(order.getUserId(), NOTIFICATION_TYPE_ORDER, BIZ_TYPE_ORDER, id,
                 "卖家已同意退款，订单「" + order.getProductTitle() + "」已取消");

@@ -146,10 +146,10 @@
 | 7.2 | PUT | `/api/v1/admin/product/audit/{id}` | 强制认证 + ROLE_ADMIN | body: `pass:boolean` `reason?` | `3→1` / `3→0`（不通过通知卖家）；`APPROVE_PRODUCT` / `REJECT_PRODUCT` |
 | 7.3 | PUT | `/api/v1/admin/product/force-offline/{id}` | 强制认证 + ROLE_ADMIN | `reason?` | `status=0`；`FORCE_OFFLINE` |
 | 7.4 | GET | `/api/v1/admin/user/list` | 强制认证 + ROLE_ADMIN | `keyword?` `status?` `page` `size` | `data`: 分页 `AdminUserVO` |
-| 7.5 | PUT | `/api/v1/admin/user/ban/{id}` | 强制认证 + ROLE_ADMIN | - | 同事务：①`status=1` ②在售商品下架 ③未完成订单冻结(0/1/2/6→5，**冻结时回补库存**) ④审计；提交后 `version+1`（重试 3 次指数退避）；`BAN_USER` |
-| 7.6 | PUT | `/api/v1/admin/user/unban/{id}` | 强制认证 + ROLE_ADMIN | - | `status=0` + `version+1`；`UNBAN_USER` |
+| 7.5 | PUT | `/api/v1/admin/user/ban/{id}` | 强制认证 + ROLE_ADMIN | - | 同事务：①`status=1` ②未完成订单冻结(0/1/2/6→5，**不回补库存**，批次 6.0.3 · B1）③下架可售商品（`status IN (1,2) → 0`，批次 6.0.3 · B2）④审计；提交后 `version+1`（重试 3 次指数退避）；`BAN_USER` |
+| 7.6 | PUT | `/api/v1/admin/user/unban/{id}` | 强制认证 + ROLE_ADMIN | - | `status=0` + `version+1`；`UNBAN_USER`；**商品不自动上架**（需卖家手动重新上架） |
 | 7.7 | GET | `/api/v1/admin/order/list` | 强制认证 + ROLE_ADMIN | `status?` `orderNo?` `page` `size` | `data`: 分页全量订单 |
-| 7.8 | PUT | `/api/v1/admin/order/unfreeze/{id}` | 强制认证 + ROLE_ADMIN | body: `target`(`CANCEL`\|`COMPLETE`) | `5→4`（**+库存回补**）或 `5→3`；`UNFREEZE_ORDER` / `COMPLETE_ORDER` |
+| 7.8 | PUT | `/api/v1/admin/order/unfreeze/{id}` | 强制认证 + ROLE_ADMIN | body: `target`(`CANCEL`\|`COMPLETE`) | `5→4`（**+库存回补**，带 `order:restored:{orderId}` 幂等凭证，同订单只补一次）或 `5→3`（不回补，货已交付）；`UNFREEZE_ORDER` / `COMPLETE_ORDER` |
 | 7.9 | PUT | `/api/v1/admin/order/force-refund/{id}` | 强制认证 + ROLE_ADMIN | `reason?` | `6/7→4` + **库存回补**；`REFUND_ORDER` |
 | 7.10 | GET | `/api/v1/admin/audit-log/list` | 强制认证 + ROLE_ADMIN | `operatorId?` `operationType?` `startTime?` `endTime?` `page` `size` | `data`: 分页 `AuditLogVO` |
 

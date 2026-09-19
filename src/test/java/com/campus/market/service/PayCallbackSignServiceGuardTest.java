@@ -85,19 +85,22 @@ class PayCallbackSignServiceGuardTest {
     }
 
     @Test
-    @DisplayName("⑤ 任务 E：报错文案必须同时给出 openssl 与 PowerShell 两行生成命令")
+    @DisplayName("⑤ 任务 E：报错文案必须给出 openssl 与 PowerShell(CSPRNG) 生成命令")
     void failureMessagesShouldContainBothPlatformCommands() {
         String hint = SecretGenerationHints.KEY_GENERATION_COMMANDS;
         assertThat(hint).contains("openssl rand -base64 48");
-        assertThat(hint).contains("[Convert]::ToBase64String((1..48 | ForEach-Object { Get-Random -Max 256 }))");
-        assertThat(hint).contains("Windows PowerShell");
+        // 6.0.3 修正：Get-Random 是伪随机（非 CSPRNG），已换成 RandomNumberGenerator
+        assertThat(hint).contains("[Security.Cryptography.RandomNumberGenerator]::GetBytes(48)");
+        assertThat(hint).contains("RandomNumberGenerator]::Create().GetBytes($b)");
+        assertThat(hint).doesNotContain("Get-Random");
+        assertThat(hint).contains("Windows PowerShell 7+").contains("Windows PowerShell 5.1");
 
-        // 四条失败文案都要带上它（运维看到哪一条都能照着生成密钥）
+        // 三条失败文案都要带上它（运维看到哪一条都能照着生成密钥）
         for (String secret : new String[]{null, "${PAY_CALLBACK_SECRET}", "a".repeat(31)}) {
             assertThatThrownBy(() -> PayCallbackSignService.validateSecret(secret, PROD))
                     .isInstanceOf(IllegalStateException.class)
-                    .hasMessageContaining("Windows PowerShell")
-                    .hasMessageContaining("openssl rand -base64 48");
+                    .hasMessageContaining("Windows PowerShell 7+")
+                    .hasMessageContaining("Linux/macOS: openssl rand -base64 48");
         }
     }
 }

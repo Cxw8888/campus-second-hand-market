@@ -115,15 +115,23 @@ class JwtUtilsSecretValidationTest {
     }
 
     @Test
-    @DisplayName("⑧ 报错文案必须同时给出 openssl 与 PowerShell 两行密钥生成命令（批次 6.0.2 · 任务 E）")
+    @DisplayName("⑧ 报错文案必须同时给出 openssl 与 PowerShell 的 CSPRNG 生成命令（6.0.2 任务 E / 6.0.3 修正）")
     void failureMessagesShouldContainBothPlatformCommands() {
         // 背景：本项目开发/答辩环境是 Windows，文案里只写 openssl 等于让人先去装一个 openssl。
-        // 这里把"两条命令都在"变成断言，避免以后改文案时又被删回一行。
+        // 6.0.3 修正：PowerShell 那行原来是 Get-Random（伪随机），已换成 RandomNumberGenerator（CSPRNG）；
+        // 并且因为 RandomNumberGenerator.GetBytes(int) 在 Windows PowerShell 5.1（.NET Framework）上
+        // 不存在（本机实测报 "does not contain a method named 'GetBytes'"），文案给出 5.1 兼容写法。
+        // 这里把"两条命令都在 + 不再出现 Get-Random"变成断言，避免以后改文案时又被改回去。
         for (String secret : new String[]{null, "short", "${JWT_SECRET}", JwtUtils.DEV_DEFAULT_SECRET}) {
             assertThatThrownBy(() -> JwtUtils.validateSecret(secret, PROD))
                     .isInstanceOf(IllegalStateException.class)
                     .hasMessageContaining("Linux/macOS: openssl rand -base64 48")
-                    .hasMessageContaining("Windows PowerShell: [Convert]::ToBase64String((1..48 | ForEach-Object { Get-Random -Max 256 }))");
+                    .hasMessageContaining("Windows PowerShell 7+: [Convert]::ToBase64String("
+                            + "[Security.Cryptography.RandomNumberGenerator]::GetBytes(48))")
+                    .hasMessageContaining("Windows PowerShell 5.1: $b=New-Object byte[] 48; "
+                            + "[Security.Cryptography.RandomNumberGenerator]::Create().GetBytes($b); "
+                            + "[Convert]::ToBase64String($b)")
+                    .hasMessageNotContaining("Get-Random");
         }
     }
 }

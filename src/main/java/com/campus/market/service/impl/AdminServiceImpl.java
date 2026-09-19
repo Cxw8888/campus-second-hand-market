@@ -50,9 +50,15 @@ import java.util.stream.Collectors;
 /**
  * 管理端服务实现。
  *
- * <p>封禁事务边界（PROJECT_CONTEXT 3.7）：①status=1 ②在售商品下架 ③未完成订单冻结（同步回补库存）
- * ④写审计日志 —— 四步同一事务；⑤user:token:version+1 在事务提交后执行（失败重试 3 次）。
+ * <p>封禁事务边界（批次 6.0.3 · B1/B2 起）：①status=1 ②<b>冻结</b>未完成订单（0/1/2/6→5，
+ * <b>不回补库存</b>）③下架可售商品（status IN (1,2) → 0）④写审计日志 —— 四步同一事务；
+ * ⑤user:token:version+1 在事务提交后执行（失败重试 3 次）。
  * 拦截器在版本比对失败时兜底查询 user:status:{userId}，双保险确保封禁立即生效。</p>
+ *
+ * <p><b>为什么封禁不回补库存</b>：冻结只是"交易暂停"，真正终止交易的是 5→4（管理员解冻转取消）。
+ * 修前"封禁时回补 + 解冻 CANCEL 时又回补"会让同一订单补两遍（库存 1 的商品被刷成 2），
+ * 反复"封禁→解冻"可无限刷库存（自审报告 B1）。现在回补只在 5→4 发生一次，
+ * 并由 {@code StockService.restoreOnce} 的 {@code order:restored:{orderId}} 凭证兜住重复调用。</p>
  */
 @Slf4j
 @Service
@@ -60,15 +66,12 @@ import java.util.stream.Collectors;
 public class AdminServiceImpl implements AdminService {
 
     private static final int PRODUCT_ON_SALE = 1;
+    private static final int PRODUCT_SOLD_OUT = 2;
     private static final int PRODUCT_OFF_SHELF = 0;
     private static final int PRODUCT_PENDING_AUDIT = 3;
 
     private static final int USER_NORMAL = 0;
     private static final int USER_BANNED = 1;
-
-    /** 未完成订单状态：0-待支付, 1-已支付待发货, 2-已发货待收货, 6-退款申请中。 */
-    private static final List<Integer> UNFINISHED_STATUS = List.of(
-            OrderStatus.PENDING_PAY, OrderStatus.PAID, OrderStatus.SHIPPED, OrderStatus.REFUND_APPLYING);
 
     private static final int TYPE_ORDER = 1;
     private static final int TYPE_AUDIT = 2;
@@ -177,31 +180,29 @@ public class AdminServiceImpl implements AdminService {
                 .set(User::getStatus, USER_BANNED)
                 .eq(User::getId, userId));
 
-        // ② 在售商品强制下架（status=0）
-        List<Product> onSaleProducts = productMapper.selectList(Wrappers.<Product>lambdaQuery()
+        // ② 先冻结未完成订单（0/1/2/6→5）
+        //    【批次 6.0.3 · B1】冻结【不再回补库存】：冻结只是"交易暂停"，
+        //    真正终止交易的是 5→4（管理员解冻转取消），回补只在那里做一次。
+        //    修前封禁时就回补 + 解冻 CANCEL 又回补 = 同一订单补两遍（库存 1 的商品被刷成 2），
+        //    而且反复"封禁→解冻"可无限刷库存。
+        int frozen = orderMapper.freezeByUser(userId);
+
+        // ③ 再下架其可售商品（在售 1 + 售罄 2）
+        //    【批次 6.0.3 · B2】必须覆盖【售罄(2)】：售罄商品同样是"还能被下单前先占住"的资产，
+        //    修前只下架 status=1，售罄商品逃过下架；配合封禁回补（已按 B1 移除）还会被
+        //    restoreStock 的 CASE 翻回在售，于是被封禁卖家的商品仍可被下单 —— 封禁形同虚设。
+        //    顺序也调整为"先冻结订单、再下架商品"（与审计文案/文档一致）。
+        List<Product> sellableProducts = productMapper.selectList(Wrappers.<Product>lambdaQuery()
                 .select(Product::getId)
                 .eq(Product::getUserId, userId)
-                .eq(Product::getStatus, PRODUCT_ON_SALE));
-        productMapper.update(null, Wrappers.<Product>lambdaUpdate()
-                .set(Product::getStatus, PRODUCT_OFF_SHELF)
-                .eq(Product::getUserId, userId)
-                .eq(Product::getStatus, PRODUCT_ON_SALE));
+                .in(Product::getStatus, PRODUCT_ON_SALE, PRODUCT_SOLD_OUT));
+        int offShelf = productMapper.offShelfByUser(userId);
         // 写路径缓存规范：下架商品后批量失效详情缓存
-        productCacheService.evictDetails(onSaleProducts.stream().map(Product::getId).collect(Collectors.toSet()));
-
-        // ③ 未完成订单冻结（0/1/2/6→5），冻结即视为交易终止，同步回补库存
-        List<Order> frozenOrders = orderMapper.selectList(Wrappers.<Order>lambdaQuery()
-                .select(Order::getId, Order::getProductId, Order::getQuantity)
-                .and(wrapper -> wrapper.eq(Order::getSellerId, userId).or().eq(Order::getUserId, userId))
-                .in(Order::getStatus, UNFINISHED_STATUS));
-        int frozen = orderMapper.freezeByUser(userId);
-        for (Order order : frozenOrders) {
-            stockService.restore(order.getProductId(), order.getQuantity());
-        }
+        productCacheService.evictDetails(sellableProducts.stream().map(Product::getId).collect(Collectors.toSet()));
 
         // ④ 审计日志（同一事务）
         adminAuditService.record(AuditOperationType.BAN_USER, "USER", userId,
-                "封禁用户, 下架商品并冻结订单数=" + frozen);
+                "封禁用户, 下架可售商品数=" + offShelf + ", 冻结订单数=" + frozen + "（冻结不回补库存）");
 
         // ⑤ 事务提交后 version+1（失败重试 3 次、指数退避；拦截器有 user:status 兜底）
         tokenVersionService.increaseVersionAfterCommit(userId);
@@ -254,12 +255,13 @@ public class AdminServiceImpl implements AdminService {
             throw BusinessException.noPermission("无权操作该订单");
         }
         if ("CANCEL".equalsIgnoreCase(request.getTarget())) {
-            // 5→4：必须同步执行库存回补
+            // 5→4：必须同步执行库存回补（【批次 6.0.3 · B1】回补只在这里发生一次，
+            // 封禁冻结时不再回补；StockService.restoreOnce 会用 order:restored:{orderId} 兜住重复调用）
             int rows = orderMapper.unfreezeToCancel(id);
             if (rows == 0) {
                 throw BusinessException.statusNotAllowed();
             }
-            stockService.restore(order.getProductId(), order.getQuantity());
+            stockService.restoreOnce(id, order.getProductId(), order.getQuantity());
             adminAuditService.record(AuditOperationType.UNFREEZE_ORDER, "ORDER", id, "解冻转已取消并回补库存");
             notificationSender.sendAsync(order.getUserId(), TYPE_ORDER, BIZ_TYPE_ORDER, id,
                     "订单「" + order.getProductTitle() + "」已由管理员解冻并取消");
@@ -290,7 +292,7 @@ public class AdminServiceImpl implements AdminService {
             }
             throw BusinessException.statusNotAllowed();
         }
-        stockService.restore(order.getProductId(), order.getQuantity());
+        stockService.restoreOnce(id, order.getProductId(), order.getQuantity());
         adminAuditService.record(AuditOperationType.REFUND_ORDER, "ORDER", id, "强制退款原因=" + reason);
         notificationSender.sendAsync(order.getUserId(), TYPE_ORDER, BIZ_TYPE_ORDER, id,
                 "订单「" + order.getProductTitle() + "」已由管理员强制退款");

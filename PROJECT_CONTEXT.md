@@ -1,4 +1,5 @@
-校园二手交易平台 - 项目需求与设计文档 (AI Context 正式封版 V28)
+校园二手交易平台 - 项目需求与设计文档 (AI Context 正式封版 V29)
+V29 核心变更：新增 3.9.1「库存回补幂等约定」（封禁不回补、只在 5→4 回补、`order:restored:{orderId}` 凭证与回滚释放）、3.9.2「封禁商品状态约定」（下架 `status IN (1,2)`、回补不改状态、下单校验卖家 status、重新上架走 `relistIfSoldOut`）、3.9.3「安全响应头约定」（CSP/HSTS 的下发边界）。技术设计不变，仅追加实现约定与踩坑记录。
 V28 核心变更：新增 3.9「安全加固批约定」（6.0.1/6.0.2）：生产 fail-fast 断言范式、支付回调 HMAC 验签（含 fail-closed 与遗留金额校验）、客户端 IP 可信代理与账号计数归一化、生产关接口文档（含"knife4j.enable=false 关不掉 /doc.html"的实测坑）与 Redis 口令取舍。技术设计不变，仅追加实现约定与踩坑记录。
 V27 核心变更：新增商品搜索优化（FULLTEXT ngram + LIKE 降级 + 60 秒缓存 + 500ms 熔断，见 3.4.1）、分类逻辑删除让位改名机制与两层缓存说明（见 3.4.2）、唯一键冲突返回 code=100（见 5.1）。技术设计不变，仅追加实现约定与踩坑记录。
 V23 核心变更：修复 V22 报告中的 1 项 Blocker（第 7 章与正文不一致）+ 3 项 Major（毕设 MVP 分级、设计图清单、外部依赖降级）+ 3 项 Minor（弱密码简化、Prometheus 可选、创新点定位）。技术设计不变，仅做毕设适配裁剪与文档自洽性修复。
@@ -201,10 +202,10 @@ stateDiagram-v2
     退款被拒 --> 已发货待收货 : 自动恢复(3天后超时,已发货) (7→2)
     退款被拒 --> 已取消 : 管理员强制退款+库存回补 (7→4)
     
-    待支付 --> 已冻结 : 用户封禁+库存回补 (0→5)
-    已支付待发货 --> 已冻结 : 用户封禁+库存回补 (1→5)
-    已发货待收货 --> 已冻结 : 用户封禁+库存回补 (2→5)
-    退款申请中 --> 已冻结 : 用户封禁+库存回补 (6→5)
+    待支付 --> 已冻结 : 用户封禁（冻结，不回补库存） (0→5)
+    已支付待发货 --> 已冻结 : 用户封禁（冻结，不回补库存） (1→5)
+    已发货待收货 --> 已冻结 : 用户封禁（冻结，不回补库存） (2→5)
+    退款申请中 --> 已冻结 : 用户封禁（冻结，不回补库存） (6→5)
     
     已冻结 --> 已取消 : 管理员解冻取消 (5→4)
     已冻结 --> 已完成 : 管理员线下完成 (5→3)
@@ -220,7 +221,7 @@ stateDiagram-v2
 
 退款流：已支付(1)或已发货(2)的订单，买家可申请退款转为 退款申请中(6)。卖家同意或管理员强制退款后转为 已取消(4)并回补库存；若卖家拒绝，则转为 退款被拒(7)。7 状态保留 3 天申诉期，超时自动恢复为原状态(1或2)，期间买家可申诉由管理员强制退款(7→4)。
 
-冻结流：处于 0/1/2/6 的订单，若用户被封禁则转为 已冻结(5)，同时执行库存回补。管理员解冻后可转为 已取消(4)或线下处理完成 已完成(3)。”
+冻结流：处于 0/1/2/6 的订单，若用户被封禁则转为 已冻结(5)（**6.0.3 起不执行库存回补** —— 冻结只是暂停交易，回补只在解冻转 5→4 时做一次）。管理员解冻后可转为 已取消(4)或线下处理完成 已完成(3)。”
 
 1.3 技术栈
 后端：Java 21, Spring Boot 3, MyBatis-Plus, MySQL 8.0, Redis, JWT, Lombok, Spring Validation, SpringDoc/knife4j, Jackson, ShedLock (shedlock-spring + shedlock-provider-jdbc-template), Spring Boot Mail (JavaMailSender), Spring Security Crypto (仅用于 BCrypt，严禁引入 starter-security)，Spring Boot Actuator，Flyway (数据库版本迁移)。
@@ -439,13 +440,17 @@ Redis Key：email:code:{email}（5分钟）、email:limit:{email}（60秒限流�
 3.2 库存扣减与一致性
 防超卖（扣减，CAS 风格）：UPDATE tb_product SET stock = stock - #{quantity}, status = CASE WHEN stock - #{quantity} = 0 THEN 2 ELSE status END WHERE id = #{id} AND stock >= #{quantity} AND status = 1 AND is_deleted = 0
 
-库存回补（统一入口，CAS 风格，无需分布式锁）：
+库存回补（统一入口，带订单维度幂等凭证，无需分布式锁）：
 
-SQL：UPDATE tb_product SET stock = stock + #{quantity}, status = CASE WHEN status = 2 THEN 1 ELSE status END WHERE id = #{id} AND is_deleted = 0
+SQL（**6.0.3 起只加库存、不改状态**）：UPDATE tb_product SET stock = stock + #{quantity} WHERE id = #{id} AND is_deleted = 0
+
+重新上架（**6.0.3 起是显式的第二步**，只在"交易终止"类回补后执行）：UPDATE tb_product SET status = 1 WHERE id = #{id} AND status = 2 AND stock > 0 AND is_deleted = 0
 
 MySQL 行锁已保证并发安全，无需 Redisson 分布式锁。回补 SQL 本身是原子操作。扣减与回补均采用 CAS 风格，架构对称。
 
 回补必须与订单状态更新同一事务，且仅在状态实际发生变更时执行（通过影响行数判断）。
+回补统一走 StockService.restoreOnce(orderId, productId, quantity)：先抢 `order:restored:{orderId}`（SETNX，TTL 30 天）再落 SQL，
+未命中/抛异常/事务回滚时释放凭证。**封禁冻结（→5）不回补**，只有 5→4（解冻转取消）才回补。详见 3.9.1 / 3.9.2。
 
 事务：@Transactional(rollbackFor = Exception.class)，CAS 失败抛 BusinessException。
 
@@ -504,9 +509,9 @@ ShedLock 配置：lockAtMostFor = PT10M。
 
 买家取消范围：买家仅可取消 status=0（待支付）订单；已支付（1/2）需走退款流程或管理员处理。
 
-库存回补触发场景清单：所有取消/退款路径必须同步执行库存回补（复用 3.2）：①买家主动取消（0→4）；②超时自动取消（0→4）；③管理端将 5→4；④卖家同意退款（6→4）；⑤管理员强制退款（6/7→4）。
+库存回补触发场景清单：所有取消/退款路径必须同步执行库存回补（复用 3.2，统一走 StockService.restoreOnce）：①买家主动取消（0→4）；②超时自动取消（0→4）；③管理端将 5→4；④卖家同意退款（6→4）；⑤管理员强制退款（6/7→4）。**（6.0.3 起封禁冻结 →5 不在清单内：冻结只是暂停交易，不碰库存。）**
 
-5-已冻结订单的库存处理：冻结即视为交易终止，冻结时同步执行库存回补，解冻后订单保持 status=5 待线下处理。5-已冻结不参与超时扫描。
+5-已冻结订单的库存处理：**冻结不回补库存**（6.0.3 起；修前"冻结回补 + 解冻 CANCEL 再回补"会刷两次库存）。冻结后订单保持 status=5 待线下处理；管理员解冻转 5→4 时回补一次（5→3 不回补，货已交付）。5-已冻结不参与超时扫描。
 
 订单冻结与解封：
 
@@ -638,7 +643,7 @@ Service 层单测（必须全覆盖）：
 
 订单超时取消：0→4 并验证库存回补。
 
-封禁冻结订单：0/1/2/6 → 5（冻结时回补库存）。
+封禁冻结订单：0/1/2/6 → 5（**不回补库存**；6.0.3 起）。
 
 管理端解冻取消：5→4 并验证库存回补。
 
@@ -710,13 +715,13 @@ InputStream 上传，try-with-resources。
 
 封禁操作事务边界与 Token version 更新：
 
-①用户 status=1 ②在售商品下架 ③未完成订单冻结（冻结时同步回补库存）④写审计日志 —— ①②③④同一事务内完成。
+①用户 status=1 ②未完成订单冻结（0/1/2/6→5，**冻结不回补库存**）③下架可售商品（status IN (1,2) → 0）④写审计日志 —— ①②③④同一事务内完成。
 
 ⑤user:token:version+1 —— 使用 TransactionSynchronizationManager.registerSynchronization 在事务提交后执行。
 
 补偿机制：version+1 若失败，重试 3 次（指数退避）；最终仍失败则记录 ERROR 级别日志并触发告警。同时拦截器在版本比对失败时，兜底查询用户 status（缓存的 user:status:{userId}），若 status=1 则直接返回 401。双保险确保封禁立即生效。
 
-分类管理与用户封禁：管理员 CRUD 分类。封禁用户商品强制下架（status=0），未完成订单冻结（status=5，SQL 必须加括号 (seller_id=? OR user_id=?)，冻结时同步回补库存）。
+分类管理与用户封禁：管理员 CRUD 分类。封禁用户商品强制下架（status IN (1,2) → 0，含售罄），未完成订单冻结（status=5，SQL 必须加括号 (seller_id=? OR user_id=?)，**冻结不回补库存**）。
 
 全局配置：
 
@@ -789,6 +794,66 @@ sign    = HMAC-SHA256(payload, PAY_CALLBACK_SECRET)      // 十六进制小写�
 - `PathConstants.PUBLIC_PATHS` 是"路径全集"，prod 实际生效集合由 `PublicPathResolver` 计算（摘除文档路径）。
   注意 `AuthInterceptor` 只挂在 `/api/v1/**`，文档路径本来就不进它 —— 该摘除属防御性第二道防线。
 - prod Redis `password: ${REDIS_PASSWORD:}` 保留空默认且**不加断言**（内网无口令是正常形态，断言会造成假失败）。
+
+### 3.9.1 库存回补幂等约定（6.0.3 · B1）
+
+**唯一入口**：`StockService.restoreOnce(orderId, productId, quantity)`。旧的无凭证 `restore(productId, quantity)`
+已删除 —— 从方法签名上就不可能"裸回补"（缺订单ID直接拒绝，宁可漏补不可裸补）。
+
+**触发点（全部走 `restoreOnce`）**：买家主动取消（0→4）、超时自动取消（0→4）、管理端解冻转取消（5→4）、
+卖家同意退款（6→4）、管理员强制退款（6/7→4）。
+
+**封禁冻结（0/1/2/6→5）不回补** —— 冻结只是"交易暂停"，终止交易的是 5→4。
+修前"封禁回补 + 解冻 CANCEL 再回补"会把同一订单补两遍（库存 1 的商品被刷成 2），反复封禁解冻可无限刷。
+
+**幂等凭证**：`order:restored:{orderId}`（`RedisKeys.orderRestored`），SETNX 抢占，TTL **30 天**。
+- 抢不到 = 该订单已补过 → 跳过（业务上不报错，仅 warn）；
+- **凭证必须是订单维度**：订单状态机的 SQL 前置条件只能保证"同一条流转不发生两次"，
+  挡不住"两条不同路径先后回补同一订单"；
+- 释放时机（这三个分支**缺一不可**，否则会出现"凭证在、库存没加"= 永久少一件库存）：
+  ① 回补未命中（商品不存在/已删，影响行数 0）；② 落 SQL 抛异常；③ **事务回滚**
+  （`TransactionSynchronizationManager.registerSynchronization` + `afterCompletion != COMMITTED`，
+  因为 Redis 与 MySQL 不在同一事务里）；
+- **Redis 不可用时降级放行**（继续回补 + warn），与支付回调去重同一取舍：
+  状态机本身能挡住同一条流转重复执行，凭证是第二道防线；反过来"Redis 挂了就不回补"会让已取消订单永久吞掉库存。
+
+### 3.9.2 封禁 / 商品状态约定（6.0.3 · B2）
+
+**封禁顺序（`AdminServiceImpl.banUser`，同一事务）**：①用户 `status=1` → ②冻结未完成订单（0/1/2/6→5，**不回补**）
+→ ③下架可售商品（`ProductMapper.offShelfByUser`：`status IN (1,2) → 0`）→ ④审计；⑤`version+1` 在事务提交后。
+
+- 下架**必须覆盖售罄(2)**：修前只下架 `status=1`，售罄商品逃过下架，配合当时回补 SQL 的
+  `CASE WHEN status = 2 THEN 1`，被封禁卖家的商品会被"翻回在售"，封禁形同虚设。
+- **回补不改状态**：`ProductMapper.restoreStock` 只 `stock = stock + quantity`，
+  **严禁**再把 `2-售罄` 改回 `1-在售`（那样任何一次回补都顺带改状态，是 B2 的成因）。
+- **"交易终止后重新可售"是显式的第二步**：`ProductMapper.relistIfSoldOut`
+  （`status = 2 AND stock > 0 → 1`），由 `StockService.restoreOnce` 在回补命中后调用。
+  前置条件 `status = 2` 是关键保护：**已下架(0) 的商品（强制下架、封禁下架）不会被它放出来**。
+- **下单必须同时校验卖家状态**（`OrderCreateService`）：商品 `status=1` **且** 卖家 `status=0`，
+  否则返回 **204「商品不存在或已下架」** —— 复用 204 而不新建"卖家已被封禁"文案，
+  避免把他人账号状态泄露给买家（与登录"先验密码后查封禁"的防探测思路一致）。
+  这一条兜住的是"下架"与"下单"之间的竞态（买家已拿到详情、封禁后才提交）。
+- **解封不自动上架**：`unbanUser` 只改用户状态；商品保持 0-下架，需卖家手动重新上架（0→3 重新审核）。
+
+### 3.9.3 安全响应头约定（6.0.3 · M7 剩余）
+
+`SecurityHeadersFilter`（`@Order(Ordered.HIGHEST_PRECEDENCE + 1)`，紧跟 `RequestIdFilter`）：
+
+| 响应头 | 范围 | 值 |
+| :--- | :--- | :--- |
+| X-Content-Type-Options | 全环境 | `nosniff` |
+| X-Frame-Options | 全环境 | `DENY`（本项目后端不提供任何需要被嵌套的页面） |
+| Referrer-Policy | 全环境 | `strict-origin-when-cross-origin` |
+| Permissions-Policy | 全环境 | `camera=(), microphone=(), geolocation=()` |
+| Content-Security-Policy | **仅 prod** | `default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; object-src 'none'; frame-ancestors 'none'; base-uri 'self'` |
+| Strict-Transport-Security | **仅 prod 且 `request.isSecure()`** | `max-age=31536000; includeSubDomains` |
+
+- CSP 允许 `'unsafe-inline'`：Vue 3 运行时注入内联样式、Element Plus / ECharts 依赖动态样式与内联脚本，
+  直接上 nonce/hash 严格模式会白屏（"为了安全把功能弄坏"）。nonce 化留给后续批次评估。
+- CSP **只在 prod**：dev 要能正常打开 knife4j 文档页（SPA，内联脚本多）。
+- HSTS **不能 always on**：它是"以后强制走 HTTPS"的承诺，纯 HTTP 部署上发这个头会让访问过的浏览器
+  在 max-age 内打不开站点。以 `request.isSecure()` 为准 —— 本机 HTTP 部署自然不发。
+- 应急开关：`app.security.headers.enabled`（全部关）、`app.security.headers.csp-enabled`（只关 CSP）。
 
 4. AI 扩展预留 (RAG 智能导购)
 MVP 阶段：关键词检索用 MySQL LIKE，必须匹配 title 或 description。必须参数化 CONCAT('%', #{keyword}, '%')，严禁拼接。
@@ -991,9 +1056,9 @@ ShedLock 使用 JdbcTemplateLockProvider；超时任务 lockAtMostFor = PT5M，�
 
 CAS 扣减：UPDATE tb_product SET stock = stock - #{quantity}, status = CASE WHEN stock - #{quantity} = 0 THEN 2 ELSE status END WHERE id = #{id} AND stock >= #{quantity} AND status = 1 AND is_deleted = 0。
 
-库存回补（CAS 风格，无需 Redisson 锁）：UPDATE tb_product SET stock = stock + #{quantity}, status = CASE WHEN status = 2 THEN 1 ELSE status END WHERE id = #{id} AND is_deleted = 0。MySQL 行锁已保证并发安全。
+库存回补（CAS 风格，无需 Redisson 锁，**6.0.3 起只加库存、不改状态**）：UPDATE tb_product SET stock = stock + #{quantity} WHERE id = #{id} AND is_deleted = 0。MySQL 行锁已保证并发安全。重新上架是显式的第二步：UPDATE tb_product SET status = 1 WHERE id = #{id} AND status = 2 AND stock > 0 AND is_deleted = 0。
 
-库存回补统一入口：所有取消/退款路径（买家主动 0→4、超时 0→4、管理端 5→4、卖家同意退款 6→4、管理员强制退款 6/7→4）必须调用回补；冻结时同步回补；5-已冻结不参与超时扫描。
+库存回补统一入口：所有取消/退款路径（买家主动 0→4、超时 0→4、管理端 5→4、卖家同意退款 6→4、管理员强制退款 6/7→4）必须调用 StockService.restoreOnce(orderId, productId, quantity)（带 `order:restored:{orderId}` 幂等凭证，TTL 30 天）；**封禁冻结（→5）不回补**；5-已冻结不参与超时扫描。
 
 金额 BigDecimal + compareTo()；下单不传 amount 和 trade_type，由后端从商品读取 trade_type 写入快照；amount = product_price × quantity。
 
@@ -1003,7 +1068,7 @@ CAS 扣减：UPDATE tb_product SET stock = stock - #{quantity}, status = CASE WH
 
 邮件发送异常：MailException 捕获返回 code=105，删除本次验证码。开发环境 email.skip=true 时直接在响应中返回验证码，不依赖 SMTP。
 
-冻结 SQL 必须加括号：UPDATE tb_order SET status=5 WHERE (seller_id = ? OR user_id = ?) AND status IN (0,1,2,6) AND is_deleted = 0；冻结时同步回补库存；解封保持 status=5 不自动恢复。
+冻结 SQL 必须加括号：UPDATE tb_order SET status=5 WHERE (seller_id = ? OR user_id = ?) AND status IN (0,1,2,6) AND is_deleted = 0；**冻结不回补库存**（6.0.3 起，回补只在 5→4 做一次）；解封保持 status=5 不自动恢复。
 
 发货专用 SQL（邮寄）：SET status=2, ship_time=NOW() WHERE status=1 AND trade_type IN (2,3) AND is_deleted=0，面交订单严禁发货。
 

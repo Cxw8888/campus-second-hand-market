@@ -2035,7 +2035,7 @@ Authorization: Bearer {{admin_token}}
 
 
 ### 6.6a 封禁用户（第1步：取防重 Token）
-# 封禁前先造一个未完成订单，验证冻结与回补
+# 封禁前先造一个未完成订单，验证冻结（6.0.3 起冻结不回补库存，回补发生在 §6.10 的 5→4）
 GET {{base}}/order/token
 Authorization: Bearer {{buyer_token}}
 
@@ -2055,7 +2055,10 @@ Content-Type: application/json
 
 > {% client.global.set("o8", response.body.data ? response.body.data.orderId : ""); %}
 
-### 6.6c 封禁用户（第3步：管理员封禁卖家 → 冻结 0/1/2/6→5 + 回补库存）
+### 6.6c 封禁用户（第3步：管理员封禁卖家 → 冻结 0/1/2/6→5）
+# 【6.0.3 · B1】封禁**不再回补库存**（冻结只是暂停交易，回补只在 §6.10 的 5→4 做一次）；
+# 【6.0.3 · B2】下架覆盖 status IN (1,2)（在售 + 售罄），且回补 SQL 不再把售罄翻回在售。
+# 因此本步之后：订单 status=5、商品 status=0、**商品库存保持封禁前的值不变**。
 PUT {{base}}/admin/user/ban/{{seller_id}}
 Authorization: Bearer {{admin_token}}
 
@@ -2108,6 +2111,8 @@ Authorization: Bearer {{admin_token}}
 
 
 ### 6.10 解冻转取消（5→4 + 库存回补）
+# 【6.0.3 · B1】这是整条封禁链路里**唯一**一次库存回补（封禁时不回补），
+# 且带 `order:restored:{orderId}` 幂等凭证：同一订单再被解冻一次也不会补第二遍。
 PUT {{base}}/admin/order/unfreeze/{{o8}}
 Authorization: Bearer {{admin_token}}
 Content-Type: application/json
@@ -2185,9 +2190,10 @@ Content-Type: application/json
 
 ### 6.15-0a 【前置】卖家发布「删除拦截」专用商品 p_block（自包含，不复用 p_mail）
 # 为什么必须自建商品（真实原因不是库存耗尽）：
-#   §6.7 封禁卖家时，AdminServiceImpl.banUser 会把该卖家【所有在售商品强制下架】(1→0)，
-#   §6.12 解封只恢复用户状态，并不会把商品重新上架。
-#   所以走到 6.15 时 p_mail 早已是 status=0（下架，库存还被封禁流程回补成了满值），
+#   §6.7 封禁卖家时，AdminServiceImpl.banUser 会把该卖家【所有可售商品强制下架】
+#   （**6.0.3 · B2 起下架覆盖 status IN (1,2)**：在售 1 与售罄 2 都下架为 0），
+#   §6.12 解封只恢复用户状态，并不会把商品重新上架（6.0.3 · B2 明确不自动上架）。
+#   所以走到 6.15 时 p_mail 早已是 status=0（下架；**6.0.3 · B1 起封禁不再回补库存**），
 #   下单会直接 204「商品不存在或已下架」，根本造不出待支付订单，
 #   于是 6.15c 的 207「商品有未完成订单，禁止删除」永远触发不了，
 #   删除反而会成功——这是用例自身的状态假设错误，不是代码缺陷。

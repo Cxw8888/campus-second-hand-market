@@ -5,9 +5,11 @@ import com.campus.market.common.exception.BusinessException;
 import com.campus.market.dto.order.OrderCreateRequest;
 import com.campus.market.entity.Order;
 import com.campus.market.entity.Product;
+import com.campus.market.entity.User;
 import com.campus.market.entity.enums.OrderStatus;
 import com.campus.market.mapper.OrderMapper;
 import com.campus.market.mapper.ProductMapper;
+import com.campus.market.mapper.UserMapper;
 import com.campus.market.service.NotificationSender;
 import com.campus.market.service.StockService;
 import com.campus.market.util.SnowflakeIdGenerator;
@@ -34,8 +36,15 @@ public class OrderCreateService {
     private static final int NOTIFICATION_TYPE_ORDER = 1;
     private static final int BIZ_TYPE_ORDER = 1;
 
+    /** 商品状态：1-上架中。 */
+    private static final int PRODUCT_ON_SALE = 1;
+
+    /** 用户状态：0-正常。 */
+    private static final int USER_NORMAL = 0;
+
     private final OrderMapper orderMapper;
     private final ProductMapper productMapper;
+    private final UserMapper userMapper;
     private final StockService stockService;
     private final SnowflakeIdGenerator snowflakeIdGenerator;
     private final NotificationSender notificationSender;
@@ -47,11 +56,24 @@ public class OrderCreateService {
     public OrderCreateVO create(OrderCreateRequest request, Long userId) {
         // ① 事务内直接读 MySQL 最新商品（绕过 Redis 缓存，规避"下单与改价并发窗口"）
         Product product = productMapper.selectById(request.getProductId());
-        if (product == null || product.getStatus() == null || product.getStatus() != 1) {
+        if (product == null || product.getStatus() == null || product.getStatus() != PRODUCT_ON_SALE) {
             throw BusinessException.productNotAvailable();
         }
         if (product.getUserId().equals(userId)) {
             throw new BusinessException(ErrorCode.PARAM_ERROR, "不能购买自己发布的商品");
+        }
+
+        // ①' 卖家状态校验（批次 6.0.3 · B2）
+        //     背景：封禁卖家时会把其"在售(1) + 售罄(2)"商品统一下架，但下架与下单之间存在竞态
+        //     （买家可能已拿到商品详情，封禁后才提交下单），仅靠商品的 status=1 判断不足以兜住。
+        //     这里在同一事务内再确认卖家 status=0（正常），把封禁从"尽力而为"变成"下单必然被拒"。
+        //     ⚠️ 失败文案复用 204「商品不存在或已下架」而不新建"卖家已被封禁"：下单接口是买家调的，
+        //       不该把另一个用户的账号状态泄露给买家（与登录"先验密码后查封禁"的防探测思路一致）。
+        User seller = userMapper.selectById(product.getUserId());
+        if (seller == null || !Integer.valueOf(USER_NORMAL).equals(seller.getStatus())) {
+            log.warn("下单被拒: 卖家不可交易, productId={}, sellerId={}, sellerStatus={}",
+                    product.getId(), product.getUserId(), seller == null ? "null" : seller.getStatus());
+            throw BusinessException.productNotAvailable();
         }
 
         // ② 交易方式快照由后端从商品读取，严禁信任前端传参
