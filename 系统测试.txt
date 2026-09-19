@@ -444,4 +444,56 @@ d	prod 全配好 → 正常启动（18081）；/doc.html、/v3/api-docs、/swagg
 		并把"必须含两行命令、且不得再出现 Get-Random"写成断言（JwtUtilsSecretValidationTest ⑧、
 		PayCallbackSignServiceGuardTest ⑤）
 
+===============================================================
+6.0.4 安全加固批测试结果（M3 通知事务边界 + M4 用户状态缓存）
+===============================================================
+测试时间	2026-09-19 14:45 ~ 14:56
+测试范围	M3（sendAsync 改为事务提交后发送）、M4（cacheUserStatus 移出事务 + 1 天 TTL + 拦截器以库为准）、
+	任务 D（6.0.3 的 afterCompletion 与本批 afterCommit 的共存验证）
+测试环境	Windows 11 / OpenJDK 21.0.12 / MySQL 8.0.46 / Redis 5.0.14 / Node v22.23.2
+	真机实例：dev @18080（本次代码 java -cp 直启）+ 2 个 @SpringBootTest 集成测试（真实 MySQL/Redis/线程池）
+
+一、后端编译与单测
+命令	javac -parameters（157 个主源文件）+ 32 个测试类，JUnit Platform Launcher 运行（-Djdk.attach.allowAttachSelf=true）
+结果	171 / 171 通过（0 失败 0 跳过）；批次前 141，本批新增 30
+新增用例	30 个（8 个新测试类，其中 2 个是真实事务边界的集成测试）：
+	NotificationAfterCommitTest 4（M3：提交后派发 / 回滚不派发 / 无事务立即派发 / 时序"业务→提交→通知"）
+	TransactionHelperTest 4（范式底座：有事务推迟、回滚不执行、无事务立即、回调异常不冒泡、null 动作）
+	AfterCommitAfterCompletionCoexistenceTest 3（任务 D：提交=通知发出+凭证保留；回滚=通知不发+凭证释放；两钩子共存）
+	AdminUserStatusCacheTest 4（M4：封禁提交后写 1、回滚不写、解封提交后写 0、无事务立即写）
+	TokenVersionCacheTtlTest 4（M4：写入带 1 天 TTL、写 0 也带 TTL、Redis 故障降级、空参不写）
+	AuthInterceptorBannedCacheTest 5（M4 读侧：缓存=0 不查库、缓存=1 库=正常→放行+清残留、缓存=1 库=封禁→401、
+		缓存缺失查库、Redis 故障查库）
+	NotificationTransactionBoundaryIntegrationTest 3（真机：回滚 2 秒后通知条数=0 / 提交后异步落库=1 / 无事务立即落库=1）
+	BanUserCacheTransactionBoundaryIntegrationTest 3（真机：回滚后 DB=0 且 Redis 无 user:status 键；提交后 DB=1 且缓存=1、
+		TTL 实测 86397~86400 秒；解封后缓存写回 0）
+
+二、M3 真机场景（dev @18080，真实 HTTP 业务链路）
+	步骤	卖家发商品(status=3) → 管理员过审(status=1) → 买家下单(orderId=182)
+	断言	卖家收到「您出售的商品…有新订单」站内信 1 条（提交后照常送达，没有因为加 afterCommit 把通知弄丢）
+	反向对照（集成测试，真实事务）	事务内 sendAsync 后 setRollbackOnly → 等待 2 秒 → tb_notification 中该标记 0 条
+		（修复前为纯 @Async：事务还没提交就把消息发出去，回滚也拦不住 = 假通知）
+
+三、M4 真机场景（dev @18080 + 真实 Redis 直查）
+	封禁前	缓存 user:status:{userId} 存在性=false；买家旧 Token 访问 /user/profile → HTTP 200
+	封禁后	DB status=1；缓存值=1；缓存 TTL=86397 秒（≈1 天；修复前为 -1 无过期）；旧 Token → HTTP 401「登录已失效，请重新登录」；
+		重新登录 → HTTP 200 + code=205「用户已被封禁」
+	反向对照（集成测试，真实事务）	事务内 banUser 后 setRollbackOnly →
+		DB status 回到 0（回滚成功）且 Redis 中不存在 user:status 键（修复前会写入封禁缓存且无 TTL → 用户永久 401）；
+		另一条用例验证提交后缓存=1 且 TTL 在 23h~24h 之间
+	读侧兜底（单测）	缓存=1 而库=正常 → 放行并删除残留缓存（自愈）；缓存=1 且库=封禁 → 401
+
+四、任务 D：afterCommit 与 afterCompletion 的共存结论
+	回调顺序	beforeCommit → beforeCompletion →(提交)→ afterCommit（本批：通知 / 用户状态缓存）
+		→ afterCompletion（6.0.3：仅非 COMMITTED 时删除 order:restored:{orderId}）
+	结论	两者触发条件互斥（一个只在成功时动、一个只在失败时动）、作用对象不同（通知/用户状态缓存 vs 库存回补凭证），
+		同一事务内共存无冲突：提交时"通知发出 + 凭证保留"，回滚时"通知不发 + 凭证释放"（3 条用例覆盖）
+
+五、前端门禁（本批未改动任何前端文件，作回归确认）
+命令	npx vitest run
+结果	17 个文件 / 177 个用例全绿（与 6.0.3 一致，无新增无回归）
+
+六、数据清理核对
+	残留用户（v603% / v604% / v604_ban_%）=0；残留通知（6.0.4-M3-%）=0；残留商品（v60%-%）=0；测试产生的 Redis 键已删除
+
 

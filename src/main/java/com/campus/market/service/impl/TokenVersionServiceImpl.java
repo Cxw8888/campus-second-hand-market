@@ -9,6 +9,8 @@ import org.springframework.stereotype.Service;
 import org.springframework.transaction.support.TransactionSynchronization;
 import org.springframework.transaction.support.TransactionSynchronizationManager;
 
+import java.time.Duration;
+
 /**
  * 用户级 Token 版本服务实现。
  *
@@ -27,6 +29,24 @@ public class TokenVersionServiceImpl implements TokenVersionService {
 
     /** 指数退避基础间隔（毫秒）：200 / 400 / 800。 */
     private static final long RETRY_BASE_MILLIS = 200L;
+
+    /**
+     * 用户状态缓存 TTL（批次 6.0.4 · M4）：<b>1 天</b>。
+     *
+     * <p><b>为什么取 1 天</b>：</p>
+     * <ul>
+     *   <li>该缓存被拦截器在<b>每个已认证请求</b>上读取，属于热路径。TTL 太短（如 5 分钟）会让
+     *       所有活跃用户周期性 miss → 每次 miss 都要查一次库，把"缓存"变成"定时打库"；</li>
+     *   <li>TTL 太长（如 30 天）会让"缓存与 DB 不一致"的残留窗口过久。
+     *       注意：<b>不一致本身已不再是正确性问题</b> ——
+     *       ① 写缓存的时机已按 M4 挪到事务提交后（回滚根本不会写）；
+     *       ② 解封会显式写入 0；
+     *       ③ 拦截器在"缓存说封禁"时会再查一次库并以库为准（见 {@code AuthInterceptor#isUserBanned}）。
+     *       因此 TTL 只是最后一道兜底，取值只需在"DB 查询压力"与"残留窗口"之间取平衡；</li>
+     *   <li>1 天 ≈ 一天一次兜底刷新，最坏情况下残留也不超过一天，且不会显著增加查库压力。</li>
+     * </ul>
+     */
+    private static final Duration CACHE_STATUS_TTL = Duration.ofDays(1);
 
     private final StringRedisTemplate redisTemplate;
 
@@ -100,8 +120,13 @@ public class TokenVersionServiceImpl implements TokenVersionService {
             return;
         }
         try {
-            redisTemplate.opsForValue().set(RedisKeys.userStatus(userId), String.valueOf(status));
-            log.info("用户状态缓存已更新: userId={}, status={}", userId, status);
+            // 【批次 6.0.4 · M4】必须带 TTL：修前用 set(key, value) 无过期，
+            // 一旦缓存与 DB 不一致（例如历史遗留的无 TTL 键、或写缓存成功但库侧被回滚/回档），
+            // 这条键会【永久】把用户钉死在"封禁"状态 → 该用户永远 401，且没有任何自愈路径。
+            // TTL 取值理由见 CACHE_STATUS_TTL 常量注释。
+            redisTemplate.opsForValue().set(RedisKeys.userStatus(userId), String.valueOf(status), CACHE_STATUS_TTL);
+            log.info("用户状态缓存已更新: userId={}, status={}, ttl={}h",
+                    userId, status, CACHE_STATUS_TTL.toHours());
         } catch (Exception e) {
             log.warn("用户状态缓存写入失败（降级，拦截器将查库兜底）: userId={}, err={}", userId, e.getMessage());
         }

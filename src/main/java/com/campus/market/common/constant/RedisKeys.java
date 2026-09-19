@@ -18,7 +18,13 @@ public final class RedisKeys {
     /** 单 Token 注销黑名单，TTL 与 Token 剩余时间一致。 */
     public static final String JWT_BLACKLIST_PREFIX = "jwt:blacklist:";
 
-    /** 拦截器兜底：用户封禁状态缓存。 */
+    /**
+     * 拦截器兜底：用户封禁状态缓存。
+     *
+     * <p><b>批次 6.0.4 · M4</b>：该键必须带 TTL（1 天，见 {@code TokenVersionServiceImpl}），
+     * 且只在封禁 / 解封事务<b>提交后</b>写入；拦截器读到 {@code "1"} 时还会再查一次库并以库为准
+     * （缓存说封禁、库说正常 → 清除残留并自愈）。</p>
+     */
     public static final String USER_STATUS_PREFIX = "user:status:";
 
     /** 登录失败计数（账号维度），TTL 5 分钟。 */

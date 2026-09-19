@@ -6,34 +6,36 @@ import com.baomidou.mybatisplus.extension.plugins.pagination.Page;
 import com.campus.market.common.exception.BusinessException;
 import com.campus.market.common.query.PageQuery;
 import com.campus.market.common.result.PageResult;
-import com.campus.market.config.AsyncConfig;
 import com.campus.market.entity.Notification;
 import com.campus.market.mapper.NotificationMapper;
 import com.campus.market.security.UserContext;
 import com.campus.market.service.NotificationService;
+import com.campus.market.service.support.NotificationDispatcher;
+import com.campus.market.util.TransactionHelper;
 import com.campus.market.vo.NotificationVO;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
-import org.springframework.scheduling.annotation.Async;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
 /**
  * 站内信服务实现。
  *
- * <p>异步发送使用专用线程池 {@code notificationExecutor}（核心 8 / 最大 16 / 队列 200 / CallerRunsPolicy），
- * 失败重试 2 次、固定间隔 2 秒，仍失败记录 error 日志降级。</p>
+ * <p><b>发送侧（6.0.4 · M3 起）</b>：{@code sendAsync} 通过
+ * {@link TransactionHelper#runAfterCommit(Runnable)} 把派发推迟到<b>事务提交后</b>，
+ * 再交给 {@link NotificationDispatcher} 用专用线程池异步执行
+ * （核心 8 / 最大 16 / 队列 200 / CallerRunsPolicy），失败重试 2 次、固定间隔 2 秒，
+ * 仍失败记录 error 日志降级。</p>
+ *
+ * <p><b>发送侧（同步）</b>：{@link #send} 与本事务同库落库，用于测试/降级等需要
+ * "通知与业务同生共死"的场景。</p>
+ *
+ * <p><b>消费侧</b>：list / read / read-all / unread-count。</p>
  */
 @Slf4j
 @Service
 @RequiredArgsConstructor
 public class NotificationServiceImpl implements NotificationService {
-
-    /** 异步发送失败后的重试次数（总尝试次数 = 1 + 2）。 */
-    private static final int MAX_RETRY = 2;
-
-    /** 重试固定间隔（毫秒）。 */
-    private static final long RETRY_INTERVAL_MILLIS = 2000L;
 
     /** 未读标记。 */
     private static final int UNREAD = 0;
@@ -42,6 +44,9 @@ public class NotificationServiceImpl implements NotificationService {
     private static final int READ = 1;
 
     private final NotificationMapper notificationMapper;
+
+    /** 异步派发器（独立 Bean：{@code @Async} 必须跨 Bean 调用才走代理）。 */
+    private final NotificationDispatcher notificationDispatcher;
 
     @Override
     @Transactional(rollbackFor = Exception.class)
@@ -58,35 +63,14 @@ public class NotificationServiceImpl implements NotificationService {
     }
 
     @Override
-    @Async(AsyncConfig.NOTIFICATION_EXECUTOR)
     public void sendAsync(Long userId, Integer type, Integer bizType, Long bizId, String content) {
-        for (int attempt = 1; attempt <= MAX_RETRY + 1; attempt++) {
-            try {
-                insertNotification(userId, type, bizType, bizId, content);
-                if (attempt > 1) {
-                    log.info("站内信异步发送第 {} 次尝试成功: userId={}, bizType={}, bizId={}",
-                            attempt, userId, bizType, bizId);
-                }
-                return;
-            } catch (Exception e) {
-                log.warn("站内信异步发送失败（第 {}/{} 次）: userId={}, bizType={}, bizId={}, err={}",
-                        attempt, MAX_RETRY + 1, userId, bizType, bizId, e.getMessage());
-                if (attempt > MAX_RETRY) {
-                    break;
-                }
-                try {
-                    // 固定间隔 2 秒，最多重试 2 次，严禁无限重试导致线程池堵塞
-                    Thread.sleep(RETRY_INTERVAL_MILLIS);
-                } catch (InterruptedException ie) {
-                    Thread.currentThread().interrupt();
-                    log.warn("站内信重试等待被中断，提前降级: userId={}, bizId={}", userId, bizId);
-                    break;
-                }
-            }
-        }
-        // 降级：记录 error 日志（业务流程已提交，前端可通过轮询接口感知缺失）
-        log.error("站内信异步发送最终失败，已降级: userId={}, type={}, bizType={}, bizId={}, content={}",
-                userId, type, bizType, bizId, content);
+        // 【批次 6.0.4 · M3】必须先过事务提交这道门：
+        //   本方法的所有调用点都在 @Transactional 方法体内，事务后段一旦回滚，
+        //   修前会立刻把"已支付/已取消/已发货"发出去 —— 用户收到的是假通知。
+        //   现在改为：有事务 → 注册 afterCommit 回调；无事务 → 立即派发。
+        //   （本方法本身【不再】是 @Async：要在调用线程里注册同步回调，
+        //     真正的异步在 NotificationDispatcher.dispatch 上，见其类注释。）
+        TransactionHelper.runAfterCommit(() -> notificationDispatcher.dispatch(userId, type, bizType, bizId, content));
     }
 
     @Override
@@ -146,20 +130,6 @@ public class NotificationServiceImpl implements NotificationService {
     }
 
     // ------------------------------------------------------------------ 内部实现
-
-    /**
-     * 单次插入（供异步重试复用）。异步线程内自行 insert，不依赖调用方事务。
-     */
-    private void insertNotification(Long userId, Integer type, Integer bizType, Long bizId, String content) {
-        Notification notification = new Notification();
-        notification.setUserId(userId);
-        notification.setType(type);
-        notification.setBizType(bizType);
-        notification.setBizId(bizId == null ? 0L : bizId);
-        notification.setContent(content);
-        notification.setIsRead(UNREAD);
-        notificationMapper.insert(notification);
-    }
 
     private static NotificationVO toVO(Notification notification) {
         NotificationVO vo = new NotificationVO();

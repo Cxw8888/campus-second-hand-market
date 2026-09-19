@@ -30,6 +30,7 @@ import com.campus.market.service.NotificationSender;
 import com.campus.market.service.ProductCacheService;
 import com.campus.market.service.StockService;
 import com.campus.market.service.TokenVersionService;
+import com.campus.market.util.TransactionHelper;
 import com.campus.market.vo.AdminUserVO;
 import com.campus.market.vo.AuditLogVO;
 import com.campus.market.vo.OrderVO;
@@ -206,8 +207,11 @@ public class AdminServiceImpl implements AdminService {
 
         // ⑤ 事务提交后 version+1（失败重试 3 次、指数退避；拦截器有 user:status 兜底）
         tokenVersionService.increaseVersionAfterCommit(userId);
-        // 提前刷新封禁状态缓存，作为拦截器版本比对失败时的兜底数据源
-        tokenVersionService.cacheUserStatus(userId, USER_BANNED);
+        // 【批次 6.0.4 · M4】状态缓存同样移到提交后写：修前在事务内写 user:status:{userId}，
+        //    封禁事务一旦回滚 → DB 里用户正常、缓存却标记封禁（且当时无 TTL）→ 该用户被永久 401。
+        //    现在回滚时根本不会写；再配合 TokenVersionServiceImpl 的 1 天 TTL 与
+        //    拦截器"缓存说封禁时以库为准"，残留缓存最坏只影响一次请求且会自愈。
+        TransactionHelper.runAfterCommit(() -> tokenVersionService.cacheUserStatus(userId, USER_BANNED));
 
         // 通知被封禁用户：相关订单已冻结，需线下处理
         if (frozen > 0) {
@@ -229,7 +233,9 @@ public class AdminServiceImpl implements AdminService {
                 .eq(User::getId, userId));
         adminAuditService.record(AuditOperationType.UNBAN_USER, "USER", userId, "解封用户");
         tokenVersionService.increaseVersionAfterCommit(userId);
-        tokenVersionService.cacheUserStatus(userId, USER_NORMAL);
+        // 【批次 6.0.4 · M4】同上：解封的缓存写 0 也放到事务提交后，
+        // 保证"库里没解封成功（事务回滚）却把缓存写成正常"这种反向不一致也不会发生。
+        TransactionHelper.runAfterCommit(() -> tokenVersionService.cacheUserStatus(userId, USER_NORMAL));
     }
 
     // ================================================================ 订单

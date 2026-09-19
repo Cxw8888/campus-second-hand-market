@@ -210,21 +210,61 @@ public class AuthInterceptor implements HandlerInterceptor {
     }
 
     /**
-     * 版本比对失败时的兜底：查询 user:status:{userId} 缓存，未命中再查库（双保险）。
+     * 兜底双保险：确认用户未被封禁（{@code user:status:{userId}} 缓存 + 查库）。
+     *
+     * <h3>批次 6.0.4 · M4 的读侧加固</h3>
+     * <p>修前逻辑是"缓存命中即定论"：命中 {@code "1"} 直接返回封禁。可一旦缓存与 DB 不一致
+     * （历史遗留的无 TTL 键、极端情况下写缓存成功但事务未提交、库侧回档等），
+     * 用户会被<b>永久 401</b> 且没有任何自愈路径 —— 这是自审报告 M4 的另一半。</p>
+     *
+     * <p>现在分三类处理：</p>
+     * <ol>
+     *   <li>缓存命中 {@code "0"}（正常）→ 直接放行，<b>不查库</b>（热路径不变，绝大多数请求走这里）；</li>
+     *   <li>缓存缺失或命中 {@code "1"}（封禁）→ <b>一律查库，以数据库为准</b>。
+     *       命中 {@code "1"} 却查出库中是正常，说明缓存残留：删除该键并放行（自愈，
+     *       下一次请求会走第 1 类）；</li>
+     *   <li>查库结果才是"是否封禁"的最终答案。</li>
+     * </ol>
+     * <p>为什么"以库为准"是安全的：封禁的封禁动作本身就在 DB 事务里（status=1），
+     * 且事务提交后还会 version+1；被拒的那条 401 文案与版本失效路径一致，
+     * 不会因此放宽任何权限。代价只是"被封禁用户"的请求多一次主键查询
+     * （这类请求本来就要被拒绝，不承载业务逻辑）。</p>
      */
     private boolean isUserBanned(Long userId) {
+        String cached = null;
         try {
-            String cached = redisTemplate.opsForValue().get(RedisKeys.userStatus(userId));
-            if (cached != null) {
-                return "1".equals(cached);
-            }
+            cached = redisTemplate.opsForValue().get(RedisKeys.userStatus(userId));
         } catch (Exception ignored) {
-            // 忽略，继续查库
+            // Redis 故障降级：忽略缓存，直接查库
         }
+        if ("0".equals(cached)) {
+            // 缓存明确说"正常"：放行（这是热路径，省掉一次查库）
+            return false;
+        }
+        boolean bannedInDb = isBannedInDb(userId);
+        if ("1".equals(cached) && !bannedInDb) {
+            // 缓存说封禁、库里是正常 → 缓存残留（M4 的成因），清掉让后续请求自愈
+            log.warn("用户状态缓存与数据库不一致（缓存=封禁/库=正常），已清除残留缓存: userId={}", userId);
+            evictUserStatus(userId);
+        }
+        return bannedInDb;
+    }
+
+    /** 以数据库为最终依据判断用户是否封禁。 */
+    private boolean isBannedInDb(Long userId) {
         User user = userMapper.selectOne(Wrappers.<User>lambdaQuery()
                 .select(User::getId, User::getStatus)
                 .eq(User::getId, userId));
         return user != null && Integer.valueOf(1).equals(user.getStatus());
+    }
+
+    /** 清除残留的用户状态缓存（失败仅降级，不影响本次请求）。 */
+    private void evictUserStatus(Long userId) {
+        try {
+            redisTemplate.delete(RedisKeys.userStatus(userId));
+        } catch (Exception e) {
+            log.warn("清除残留用户状态缓存失败（降级）: userId={}, err={}", userId, e.getMessage());
+        }
     }
 
     private boolean failOptional(boolean required, String reason) {

@@ -1,4 +1,5 @@
-校园二手交易平台 - 项目需求与设计文档 (AI Context 正式封版 V29)
+校园二手交易平台 - 项目需求与设计文档 (AI Context 正式封版 V30)
+V30 核心变更：新增 3.9.4「事务边界与异步通知约定」（`TransactionHelper.runAfterCommit` 范式、`NotificationDispatcher` 独立 Bean 的原因、CallerRunsPolicy 的 sleep 为何不再持有行锁）、3.9.5「用户封禁缓存约定」（写完移到提交后、TTL 1 天、拦截器"缓存说封禁时以库为准"）。技术设计不变，仅追加实现约定与踩坑记录。
 V29 核心变更：新增 3.9.1「库存回补幂等约定」（封禁不回补、只在 5→4 回补、`order:restored:{orderId}` 凭证与回滚释放）、3.9.2「封禁商品状态约定」（下架 `status IN (1,2)`、回补不改状态、下单校验卖家 status、重新上架走 `relistIfSoldOut`）、3.9.3「安全响应头约定」（CSP/HSTS 的下发边界）。技术设计不变，仅追加实现约定与踩坑记录。
 V28 核心变更：新增 3.9「安全加固批约定」（6.0.1/6.0.2）：生产 fail-fast 断言范式、支付回调 HMAC 验签（含 fail-closed 与遗留金额校验）、客户端 IP 可信代理与账号计数归一化、生产关接口文档（含"knife4j.enable=false 关不掉 /doc.html"的实测坑）与 Redis 口令取舍。技术设计不变，仅追加实现约定与踩坑记录。
 V27 核心变更：新增商品搜索优化（FULLTEXT ngram + LIKE 降级 + 60 秒缓存 + 500ms 熔断，见 3.4.1）、分类逻辑删除让位改名机制与两层缓存说明（见 3.4.2）、唯一键冲突返回 code=100（见 5.1）。技术设计不变，仅追加实现约定与踩坑记录。
@@ -620,8 +621,8 @@ search.circuit-breaker.open-millis: 30000
 3.5 多线程、线程池、站内信与测试
 线程池：自定义 ThreadPoolTaskExecutor，参数依据：核心 8（4 核 CPU × 2 IO 密集型经验值），最大 16（突发预留），队列 200（缓冲上限），拒绝策略 CallerRunsPolicy，严禁 Executors 快捷方法。启动类加 @EnableAsync。
 
-异步解耦：下单/取消/冻结/退款等状态变更后异步发站内信（含 biz_type + biz_id），失败记录日志并降级。接收者：下单/支付成功→卖家；发货/面交完成→买家；取消/退款→对方；冻结→买卖双方；审核→发布者；自动确认收货前 24 小时→买家。
-重试机制：异步发送站内信若失败，必须重试 2 次（固定间隔 2 秒）。2 次重试仍失败，才记录 error 日志并降级为前端弹窗提示。严禁直接丢弃或无限重试导致线程池堵塞。
+异步解耦：下单/取消/冻结/退款等状态变更后异步发站内信（含 biz_type + biz_id），失败记录日志并降级。接收者：下单/支付成功→卖家；发货/面交完成→买家；取消/退款→对方；冻结→买卖双方；审核→发布者；自动确认收货前 24 小时→买家。**（6.0.4 · M3 起：一律在"事务提交后"才派发，见 3.9.4。）**
+重试机制：异步发送站内信若失败，必须重试 2 次（固定间隔 2 秒）。2 次重试仍失败，才记录 error 日志并降级为前端弹窗提示。严禁直接丢弃或无限重试导致线程池堵塞。**（6.0.4 起重试逻辑位于 `NotificationDispatcher`；因为已在事务提交后，池满触发 CallerRunsPolicy 时的 2 秒等待不再持有任何行锁。）**
 
 站内信消费端接口（带归属校验）：
 
@@ -719,7 +720,7 @@ InputStream 上传，try-with-resources。
 
 ⑤user:token:version+1 —— 使用 TransactionSynchronizationManager.registerSynchronization 在事务提交后执行。
 
-补偿机制：version+1 若失败，重试 3 次（指数退避）；最终仍失败则记录 ERROR 级别日志并触发告警。同时拦截器在版本比对失败时，兜底查询用户 status（缓存的 user:status:{userId}），若 status=1 则直接返回 401。双保险确保封禁立即生效。
+补偿机制：version+1 若失败，重试 3 次（指数退避）；最终仍失败则记录 ERROR 级别日志并触发告警。同时拦截器在版本比对失败时，兜底查询用户 status（缓存的 user:status:{userId}），若 status=1 则直接返回 401。双保险确保封禁立即生效。**（6.0.4 · M4：该缓存的写入移到封禁/解封事务提交后、带 1 天 TTL，且拦截器读到"封禁"时还会再查一次库并以库为准 —— 见 3.9.5。）**
 
 分类管理与用户封禁：管理员 CRUD 分类。封禁用户商品强制下架（status IN (1,2) → 0，含售罄），未完成订单冻结（status=5，SQL 必须加括号 (seller_id=? OR user_id=?)，**冻结不回补库存**）。
 
@@ -854,6 +855,63 @@ sign    = HMAC-SHA256(payload, PAY_CALLBACK_SECRET)      // 十六进制小写�
 - HSTS **不能 always on**：它是"以后强制走 HTTPS"的承诺，纯 HTTP 部署上发这个头会让访问过的浏览器
   在 max-age 内打不开站点。以 `request.isSecure()` 为准 —— 本机 HTTP 部署自然不发。
 - 应急开关：`app.security.headers.enabled`（全部关）、`app.security.headers.csp-enabled`（只关 CSP）。
+
+### 3.9.4 事务边界与异步通知约定（6.0.4 · M3）
+
+**铁律：凡是"事务成功后才该发生"的副作用（发站内信、写用户状态缓存），一律用
+`TransactionHelper.runAfterCommit(Runnable)` 推迟到提交后执行。**
+
+```java
+TransactionHelper.runAfterCommit(() -> notificationSender.sendAsync(...));  // 有事务→afterCommit；无事务→立即执行
+```
+
+- **为什么**：Redis / 线程池 / 站内信都不参与 MySQL 回滚。写在事务里 = 事务后段回滚时
+  "业务数据没了、通知却已发出"（自审报告 M3 的假通知）。
+- **"无事务立即执行"是必需分支**：否则定时任务、单测直调等无事务路径的通知会被**静默丢弃**
+  （比发假通知更难发现）。
+- **回调内异常必须吞掉**：`afterCommit` 抛出的异常会沿 `commit()` 冒泡到调用方 ——
+  而事务已经提交，用户会看到"业务报错"但数据其实已落库，属最糟的一类误导。
+  `TransactionHelper` 统一 catch + `log.error`。
+
+**发送链路（三层，各司其职）**：
+
+| 层 | 位置 | 职责 |
+| :--- | :--- | :--- |
+| 业务调用 | `NotificationSender.sendAsync` | 业务只调它，不关心事务细节 |
+| 事务门 | `NotificationServiceImpl.sendAsync` | `runAfterCommit(...)` 注册（**本身不再是 `@Async`**） |
+| 异步派发 | `NotificationDispatcher.dispatch`（`@Async(NOTIFICATION_EXECUTOR)`） | 专用线程池 + 重试 2 次 + 降级 |
+
+**`NotificationDispatcher` 为什么必须是独立 Bean**：Spring 的 `@Async` 依赖 AOP 代理，
+**同类内部调用不走代理**。若把 `@Async` 方法留在 `NotificationServiceImpl` 内部自调用，
+它会退化成**同步**执行 —— 请求线程在 afterCommit 里阻塞到重试结束（最坏 2×2 秒），比修复前更糟。
+
+**CallerRunsPolicy 的 sleep 为什么不再是问题**：线程池满时由调用线程执行这段 2 秒等待，
+但此时**事务已提交、行锁已在 COMMIT 时释放**（不再"持有订单行锁 sleep"）。
+残余代价：该线程仍在 afterCommit 阶段，事务连接要等 `afterCompletion` 才归还连接池，
+因此极端情况下会多占用一个池内连接数秒（已写入 6.0.4 报告「五、没能验证的部分」）。
+
+**与 3.9.1 的 afterCompletion 共存（Spring 回调顺序，勿改）**：
+`beforeCommit → beforeCompletion → (提交) → afterCommit → afterCompletion`。
+本批的 `afterCommit` 只在**成功**时动作，6.0.3 的 `afterCompletion` 只在**未提交**时动作
+（释放 `order:restored:{orderId}`）—— 触发条件互斥、作用对象不同，可安全共存于同一事务。
+
+### 3.9.5 用户封禁状态缓存约定（6.0.4 · M4）
+
+`user:status:{userId}` 是拦截器的兜底数据源（版本比对通过后再确认没被封禁），三条约定：
+
+1. **写入时机**：只在封禁 / 解封**事务提交后**写（`TransactionHelper.runAfterCommit`）。
+   事务回滚则**根本不写** —— 修前在事务内写，回滚后"库里正常、缓存封禁"→ 用户永久 401。
+2. **必须带 TTL：1 天**（`TokenVersionServiceImpl.CACHE_STATUS_TTL`）。
+   修前是无过期的 `set`，一旦不一致就永久残留且无自愈路径。
+   取 1 天的理由：该缓存被**每个已认证请求**读取（热路径），TTL 太短会让所有活跃用户周期性 miss
+   去查库；太长则残留窗口过久。1 天 ≈ 一天一次兜底刷新。
+3. **读侧以库为准**（`AuthInterceptor#isUserBanned`）：
+   - 缓存 = `"0"` → 直接放行，**不查库**（热路径，绝大多数请求走这里）；
+   - 缓存 = `"1"` 或缺失 → **一律查库**，以库为最终依据；缓存说封禁而库说正常 → 删掉残留键并放行（自愈）。
+   - 代价：被封禁用户的请求多一次主键查询（这类请求本就要被 401 拒绝，不承载业务）。
+
+   ⚠️ 注意：**"以库为准"不等于放宽封禁** —— 封禁动作本身写在 DB 事务里（status=1），
+   且提交后还有 version+1；被拒时的文案与版本失效路径一致。
 
 4. AI 扩展预留 (RAG 智能导购)
 MVP 阶段：关键词检索用 MySQL LIKE，必须匹配 title 或 description。必须参数化 CONCAT('%', #{keyword}, '%')，严禁拼接。
@@ -1034,7 +1092,7 @@ Redis 维护 user:token:version:{userId}，JWT payload 携带 version，拦截�
 
 改密/换绑/找回密码/封禁/解封时 version+1。
 
-封禁 version+1 使用 TransactionSynchronizationManager 事务提交后执行，失败重试 3 次，拦截器兜底查 user:status:{userId}。
+封禁 version+1 使用 TransactionSynchronizationManager 事务提交后执行，失败重试 3 次，拦截器兜底查 user:status:{userId}。**（6.0.4 · M4：user:status:{userId} 与 version+1 一样只在事务提交后写，且带 1 天 TTL；拦截器缓存命中"封禁"时必须再查库并以库为准。）**
 
 MyBatis-Plus 分页插件 + ShedLock + 线程池：
 
