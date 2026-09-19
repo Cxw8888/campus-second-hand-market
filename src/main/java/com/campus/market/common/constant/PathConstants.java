@@ -16,6 +16,12 @@ public final class PathConstants {
 
     /**
      * ① 完全公开路径：完全跳过拦截器，不解析 Token。
+     *
+     * <p><b>批次 6.0.2 · M7-a</b>：本常量是"路径全集"，生产环境实际使用的集合由
+     * {@code PublicPathResolver} 按 profile 计算 —— prod 下会摘除接口文档相关路径
+     * （{@code /doc.html}、{@code /swagger-ui/**}、{@code /v3/api-docs/**}、{@code /webjars/**}）。
+     * 之所以保留本常量不改，是为了不动 {@code AuthInterceptor} 等处的静态引用；
+     * 之所以要"摘除"，是为了在配置开关（{@code knife4j.enable=false}）之外再加一道防线。</p>
      */
     public static final String[] PUBLIC_PATHS = {
             "/actuator/health",

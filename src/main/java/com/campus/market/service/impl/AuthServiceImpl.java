@@ -7,6 +7,7 @@ import com.campus.market.common.enums.ErrorCode;
 import com.campus.market.common.exception.BusinessException;
 import com.campus.market.config.properties.JwtProperties;
 import com.campus.market.config.properties.LoginSecurityProperties;
+import com.campus.market.config.properties.TrustedProxyProperties;
 import com.campus.market.dto.auth.LoginRequest;
 import com.campus.market.dto.auth.RegisterRequest;
 import com.campus.market.dto.auth.ResetPasswordRequest;
@@ -44,6 +45,22 @@ import java.util.Locale;
  *       TTL 30 分钟并返回 104「IP已被临时限制，请稍后重试」。</li>
  * </ul>
  *
+ * <h3>批次 6.0.2 安全加固 · M1</h3>
+ * <p>修前有两个洞，合起来等于"在线口令爆破几乎无限制"：</p>
+ * <ol>
+ *   <li><b>IP 维度可伪造</b>：{@code IpUtils} 无条件采信 {@code X-Forwarded-For}，
+ *       每次换一个伪造 IP 就换一份计数额度（且审计日志 IP 失真）。修法见 {@code IpUtils}
+ *       （只在 {@code app.security.trusted-proxies} 命中的可信代理之后才采信转发头）；</li>
+ *   <li><b>账号维度未归一化</b>：计数 Key 直接拼 {@code getUsername().trim()}，而 {@code tb_user}
+ *       是 {@code utf8mb4_0900_ai_ci}（大小写不敏感）—— {@code admin} / {@code Admin} /
+ *       {@code aDmIn} 登录到<b>同一个账号</b>，却各有一份失败计数，5 次/15 分钟的保护被放大 2ⁿ 倍。
+ *       修法：所有用 username 拼 Key 的位置统一走 {@link #normalizeUsername(String)}
+ *       （{@code trim + toLowerCase(Locale.ROOT)}），与数据库排序规则语义对齐。</li>
+ * </ol>
+ * <p><b>迁移影响</b>：Key 形态变化会让"含大写字母的账号"当前累计的失败计数重置一次
+ * （旧 Key {@code login:fail:Admin} 不再被读取）。对安全是<b>单向收紧</b>：
+ * 重置后所有大小写变体共用同一份计数，不存在"少算"的窗口。</p>
+ *
  * <h3>防状态探测</h3>
  * 先校验密码（失败 101），密码正确后再校验 status（封禁 205），严禁先查 status。
  */
@@ -76,6 +93,8 @@ public class AuthServiceImpl implements AuthService {
     private final LoginSecurityProperties loginSecurityProperties;
     private final JwtProperties jwtProperties;
     private final LocalJwtBlacklist localJwtBlacklist;
+    /** 可信代理列表（批次 6.0.2 · M1）：为空表示不采信任何转发头。 */
+    private final TrustedProxyProperties trustedProxyProperties;
 
     // ================================================================== 注册
 
@@ -89,8 +108,13 @@ public class AuthServiceImpl implements AuthService {
         PasswordValidator.validate(request.getPassword());
 
         // ③ 唯一性校验
-        String username = request.getUsername().trim();
-        if (existsByUsername(username)) {
+        //    批次 6.0.2 · M1：预检用归一化后的账号（与 tb_user 的 ci 排序规则口径一致，
+        //    否则 "Admin" 与已存在的 "admin" 在预检时看着不重名，直到 INSERT 撞唯一索引才报错）。
+        //    ⚠️ 落库仍保留用户输入的大小写：存的是"账号"，展示与排查都更贴近原样，
+        //       而登录查询与计数 Key 一律走归一化 —— 两者靠 ci 排序规则对齐。
+        String storedUsername = request.getUsername().trim();
+        String usernameKey = normalizeUsername(request.getUsername());
+        if (existsByUsername(usernameKey)) {
             throw new BusinessException(ErrorCode.PARAM_ERROR, "该学号已被注册");
         }
         String email = normalizeEmail(request.getEmail());
@@ -100,15 +124,15 @@ public class AuthServiceImpl implements AuthService {
 
         // ④ 落库（密码仅存 BCrypt 哈希）
         User user = new User();
-        user.setUsername(username);
+        user.setUsername(storedUsername);
         user.setPassword(passwordEncoder.encode(request.getPassword()));
-        user.setNickname(resolveNickname(request.getNickname(), username));
+        user.setNickname(resolveNickname(request.getNickname(), storedUsername));
         user.setEmail(email);
         user.setRole(ROLE_STUDENT);
         user.setStatus(STATUS_NORMAL);
         userMapper.insert(user);
 
-        log.info("用户注册成功: userId={}, username={}", user.getId(), username);
+        log.info("用户注册成功: userId={}, username={}", user.getId(), storedUsername);
         return user.getId();
     }
 
@@ -116,7 +140,9 @@ public class AuthServiceImpl implements AuthService {
 
     @Override
     public LoginVO login(LoginRequest request, HttpServletRequest httpRequest) {
-        String username = request.getUsername().trim();
+        // 批次 6.0.2 · M1：账号先归一化再拼 Key / 查库，与 tb_user 的 utf8mb4_0900_ai_ci 语义对齐，
+        // 避免 admin / Admin / aDmIn 各拿一份失败计数额度。
+        String username = normalizeUsername(request.getUsername());
         String ip = resolveClientIp(httpRequest);
         String failKey = RedisKeys.loginFail(username);
         String lockKey = RedisKeys.loginLock(username);
@@ -335,13 +361,36 @@ public class AuthServiceImpl implements AuthService {
     }
 
     /**
+     * 账号归一化（批次 6.0.2 · M1）：{@code trim + toLowerCase(Locale.ROOT)}。
+     *
+     * <p><b>为什么必须归一化</b>：{@code tb_user.username} 用的是
+     * {@code utf8mb4_0900_ai_ci}（大小写不敏感），因此 {@code admin} / {@code Admin} /
+     * {@code aDmIn} 都能登录到同一个账号；但 Redis 计数 Key 是大小写敏感的字符串拼接，
+     * 三种写法会各拿一份"5 次/15 分钟"的额度 —— 含字母的账号（含全部 demo 管理员
+     * {@code adminXXXXXXXX}）等于把爆破预算放大了 2ⁿ 倍。</p>
+     *
+     * <p>用 {@link Locale#ROOT} 而不是默认 Locale：土耳其语等区域下
+     * {@code "I".toLowerCase()} 会得到 {@code "ı"}，那会让同一个账号在两个 Locale 的机器上
+     * 落到不同 Key —— 单机看不出来，多实例/容器化时就是"计数偶发不共享"的幽灵 Bug。</p>
+     *
+     * @param username 原始账号（可为 null）
+     * @return 归一化后的账号；入参为 null 时返回 null（交由上层校验处理）
+     */
+    public static String normalizeUsername(String username) {
+        return username == null ? null : username.trim().toLowerCase(Locale.ROOT);
+    }
+
+    /**
      * 解析客户端 IP；缺失时退化为远端地址。同一 IP 共用一个计数 Key，不会产生无界 Key 集合。
+     *
+     * <p>批次 6.0.2 · M1：改为<b>只在可信代理之后</b>采信 {@code X-Forwarded-For}
+     * （可信列表见 {@code app.security.trusted-proxies}，默认为空 = 不采信任何转发头）。</p>
      */
     private String resolveClientIp(HttpServletRequest httpRequest) {
         if (httpRequest == null) {
             return "unknown";
         }
-        String ip = IpUtils.getClientIp(httpRequest);
+        String ip = IpUtils.getClientIp(httpRequest, trustedProxyProperties.getTrustedProxies());
         if (ip == null || ip.isBlank() || "unknown".equalsIgnoreCase(ip)) {
             String remote = httpRequest.getRemoteAddr();
             return (remote == null || remote.isBlank()) ? "unknown" : remote;

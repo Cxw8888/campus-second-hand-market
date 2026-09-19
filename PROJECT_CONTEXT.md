@@ -1,4 +1,5 @@
-校园二手交易平台 - 项目需求与设计文档 (AI Context 正式封版 V27)
+校园二手交易平台 - 项目需求与设计文档 (AI Context 正式封版 V28)
+V28 核心变更：新增 3.9「安全加固批约定」（6.0.1/6.0.2）：生产 fail-fast 断言范式、支付回调 HMAC 验签（含 fail-closed 与遗留金额校验）、客户端 IP 可信代理与账号计数归一化、生产关接口文档（含"knife4j.enable=false 关不掉 /doc.html"的实测坑）与 Redis 口令取舍。技术设计不变，仅追加实现约定与踩坑记录。
 V27 核心变更：新增商品搜索优化（FULLTEXT ngram + LIKE 降级 + 60 秒缓存 + 500ms 熔断，见 3.4.1）、分类逻辑删除让位改名机制与两层缓存说明（见 3.4.2）、唯一键冲突返回 code=100（见 5.1）。技术设计不变，仅追加实现约定与踩坑记录。
 V23 核心变更：修复 V22 报告中的 1 项 Blocker（第 7 章与正文不一致）+ 3 项 Major（毕设 MVP 分级、设计图清单、外部依赖降级）+ 3 项 Minor（弱密码简化、Prometheus 可选、创新点定位）。技术设计不变，仅做毕设适配裁剪与文档自洽性修复。
 
@@ -745,6 +746,49 @@ UTF-8、GMT+8、Jackson 长整型转字符串、MyBatis-Plus 分页插件、Spri
 文件上传：封装统一组件，对接 StorageService。
 
 未读数轮询：前端每 30 秒轮询 /api/v1/notification/unread-count。
+
+### 3.9 安全加固批约定（6.0.1 / 6.0.2）
+
+**① 生产环境 fail-fast 断言（6.0.1 起）**
+敏感配置**不写默认值**并不是"一定会启动失败"：实测环境变量缺失时 Spring 不抛"占位符无法解析"，
+而是把字面量 `${JWT_SECRET}` / `${PAY_CALLBACK_SECRET}` 绑定到 `@ConfigurationProperties` 字段上。
+因此每项敏感配置都必须配一条**启动断言**（`@PostConstruct`）来识别这种未替换的占位符，并给出可执行提示。
+现有三条：JWT 密钥（`JwtUtils`）、`email.skip=true`（`EmailCodeServiceImpl`）、支付回调密钥（`PayCallbackSignService`）。
+Profile 判定统一走 `ProfileConstants.isProd()`，严禁各写字符串字面量（否则是"断言静默失效"）。
+报错文案必须同时给出 Linux/macOS 与 Windows PowerShell 两行密钥生成命令（常量 `SecretGenerationHints`）。
+
+**② 支付回调验签（6.0.2 · S3）**
+`POST /api/v1/order/pay/callback` 是公开路径，必须带 HMAC 签名：
+
+```
+payload = orderNo + "|" + tradeNo + "|" + timestamp      // timestamp 为毫秒
+sign    = HMAC-SHA256(payload, PAY_CALLBACK_SECRET)      // 十六进制小写，常量时间比对
+```
+
+- 校验顺序：时间戳在 `app.pay.timestamp-window-seconds`（默认 300s）内 → `sign` 非空 → HMAC 匹配 → 订单存在；
+  任一失败 **code=100「回调签名校验失败」且不改状态**，且**绝不写 Redis 去重键**（否则非法请求会把合法回调顶掉）。
+- 通过后才按 `order_no + tradeNo` 去重（`pay:callback:{orderNo}:{tradeNo}`，TTL 7 天），再走状态机 0→1。
+- **未配置密钥 = 一律拒绝**（fail-closed），不存在"没密钥就跳过验签"；prod 未注入直接启动失败。
+- **遗留**：签名 payload 不含金额，接真实网关前必须补（下一批 P0）。
+
+**③ 客户端 IP 与登录计数（6.0.2 · M1）**
+- `X-Forwarded-For` 等转发头**只有在"直连对端(RemoteAddr)命中 `app.security.trusted-proxies`"时才采信**；
+  列表默认为空 = 谁都不信 = 一律用 `RemoteAddr`（最安全，直连部署无需配置）。
+- 采信时采用**从右往左跳过可信代理、取第一个不可信地址**（不是"取第一个"：nginx 的
+  `$proxy_add_x_forwarded_for` 会保留客户端自带的 XFF，取第一个等于取到攻击者可控值）。
+- 转发头取值有字符白名单 + 长度上限（它会被拼进 Redis Key 与日志），不合格一律退回 `RemoteAddr`。
+- **账号维度计数 Key 必须归一化**：`normalizeUsername() = trim + toLowerCase(Locale.ROOT)`，
+  与 `tb_user` 的 `utf8mb4_0900_ai_ci` 语义对齐；否则 `admin`/`Admin`/`aDmIn` 各有一份 5 次额度（等于放大 2ⁿ 倍）。
+  落库仍保留用户输入的大小写，登录查询与计数 Key 一律走归一化。
+
+**④ 生产环境收敛（6.0.2 · M7）**
+- prod 关接口文档：`knife4j.enable=false` + `springdoc.api-docs.enabled=false` + `springdoc.swagger-ui.enabled=false`。
+  **实测坑**：这三行**关不掉 `/doc.html`** —— 它是 knife4j jar 内 `META-INF/resources/doc.html` 的静态资源，
+  由 Spring Boot 默认静态资源映射直接吐出。故 prod 另注册 `ApiDocGuardInterceptor` 封禁
+  `PublicPathResolver.DOC_PATHS`，按"接口不存在"统一语义处理（HTTP 200 + code=100）。
+- `PathConstants.PUBLIC_PATHS` 是"路径全集"，prod 实际生效集合由 `PublicPathResolver` 计算（摘除文档路径）。
+  注意 `AuthInterceptor` 只挂在 `/api/v1/**`，文档路径本来就不进它 —— 该摘除属防御性第二道防线。
+- prod Redis `password: ${REDIS_PASSWORD:}` 保留空默认且**不加断言**（内网无口令是正常形态，断言会造成假失败）。
 
 4. AI 扩展预留 (RAG 智能导购)
 MVP 阶段：关键词检索用 MySQL LIKE，必须匹配 title 或 description。必须参数化 CONCAT('%', #{keyword}, '%')，严禁拼接。

@@ -164,6 +164,18 @@ app:
     campus-suffixes: ${CAMPUS_EMAIL_SUFFIXES:@stu.edu.cn,@campus.edu.cn}
 
   security:
+    # ---------------- 可信反向代理（批次 6.0.2 · M1） ----------------
+    # 只有在"直连对端(RemoteAddr)命中本列表"时，才采信 X-Forwarded-For / X-Real-IP；
+    # 否则一律用 request.getRemoteAddr()。
+    # 默认【空列表】= 不采信任何转发头 = 最安全（本地开发、直连部署都不需要配）。
+    # 部署在 nginx / SLB / 网关之后时，把【代理自己的地址】填进来（支持单个 IP 与 CIDR）：
+    #   trusted-proxies:
+    #     - 10.0.0.0/8
+    #     - 192.168.0.0/16
+    #     - 127.0.0.1
+    # ⚠️ 修前 IpUtils 无条件采信 XFF，攻击者换个 header 就换一份 IP 维度失败额度；
+    #    配上本列表即表示"转发头由可信代理写入"，请按实际网络拓扑填写，不要填过宽。
+    # （本批不写 key：字段默认值就是空列表；若写成 ${TRUSTED_PROXIES:} 反而引入空字符串绑定歧义）
     login:
       account-fail-threshold: 5
       account-fail-ttl-seconds: 300
@@ -171,6 +183,19 @@ app:
       ip-fail-threshold: 20
       ip-fail-window-seconds: 300
       ip-lock-seconds: 1800
+
+  # ---------------- 支付回调验签（批次 6.0.2 · S3） ----------------
+  # 公开路径 /api/v1/order/pay/callback 必须有签名才受理，算法见 PayCallbackSignService：
+  #   sign = HMAC-SHA256(orderNo + "|" + tradeNo + "|" + timestamp, callback-secret) 的十六进制小写
+  pay:
+    # 空默认值：本地开发不注入也能启动，但此时回调【一律拒绝】(fail-closed)，绝不"没签名也放行"。
+    # 本地要联调模拟回调（curl / .http 脚本），显式注入 PAY_CALLBACK_SECRET（>= 32 字节）：
+    #   Linux/macOS       : openssl rand -base64 48
+    #   Windows PowerShell: [Convert]::ToBase64String((1..48 | ForEach-Object { Get-Random -Max 256 }))
+    # 生产环境见 application-prod.yml（无默认值 + 启动断言三连）。
+    callback-secret: ${PAY_CALLBACK_SECRET:}
+    # 请求 timestamp（毫秒）与服务器时间允许的最大偏差，超过即拒绝（压缩重放窗口）
+    timestamp-window-seconds: 300
 
   order:
     token-ttl-seconds: 300

@@ -73,10 +73,14 @@ public class OrderController {
         return Result.success(orderService.pay(id));
     }
 
-    @Operation(summary = "模拟支付回调", description = "公开路径（签名校验）；按 order_no + tradeNo 幂等去重，重复回调直接返回成功")
+    @Operation(summary = "模拟支付回调",
+            description = "公开路径；**必须携带 HMAC-SHA256 签名**（sign = HMAC(orderNo|tradeNo|timestamp, PAY_CALLBACK_SECRET)，"
+                    + "timestamp 为毫秒且偏差不超过 app.pay.timestamp-window-seconds）。"
+                    + "验签失败 → code=100「回调签名校验失败」且不改状态；"
+                    + "验签通过后按 order_no + tradeNo 幂等去重，重复回调直接返回成功")
     @PostMapping("/pay/callback")
     public Result<Boolean> payCallback(@Valid @RequestBody PayCallbackRequest request) {
-        boolean processed = orderService.handlePayCallback(request.getOrderNo(), request.getTradeNo());
+        boolean processed = orderService.handlePayCallback(request);
         return Result.success(processed ? "支付成功" : "请勿重复回调", processed);
     }
 

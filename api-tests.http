@@ -25,6 +25,13 @@
 #              导致 LIKE 条件整段跳过、返回全部上架商品）；3.20b 用负向对照锁死该行为。
 #       3.15   编辑重审：1-上架中 改关键字段 → 必须回到 3-待审核（3.15e），
 #              只改非关键字段 → 必须保持 1（3.15h）。此前用例编辑的是本就处于 3 的商品，等于没测。
+#  9. 【6.0.2 起支付回调必须签名】/order/pay/callback 现在校验 HMAC-SHA256 签名，
+#     无签名 / 错签名 / 时间戳超出 5 分钟窗口一律返回 code=100「回调签名校验失败」。
+#     签名算法：sign = HMAC-SHA256(orderNo + "|" + tradeNo + "|" + timestamp, PAY_CALLBACK_SECRET)
+#              （十六进制小写；timestamp 为毫秒）
+#     ⚠️ 跑 §4.28c / §4.28d 之前，后端必须以同一个密钥启动，例如：
+#          $env:PAY_CALLBACK_SECRET = "dev-pay-callback-secret-0123456789-abcdefgh"
+#        （密钥在 0.0 里写入 {{pay_callback_secret}}，两处必须一致；不注入密钥时回调一律被拒绝）
 ###############################################################################
 
 
@@ -45,6 +52,10 @@ GET http://127.0.0.1:8080/actuator/health
     client.global.set("run", suffix);
     client.global.set("pwd", "Passw0rd!2024");          // 8-20 位 + 字母 + 数字 + 特殊字符
     client.global.set("pwd_new", "NewPassw0rd!2024");
+
+    // 6.0.2 起：支付回调必须验签。这里写入的密钥必须与后端环境变量 PAY_CALLBACK_SECRET 一致，
+    // 否则 §4.28c/4.28d 会返回 code=100「回调签名校验失败」。
+    client.global.set("pay_callback_secret", "dev-pay-callback-secret-0123456789-abcdefgh");
 
     client.global.set("seller_user", "seller" + suffix);
     client.global.set("seller_email", "seller" + suffix + "@stu.edu.cn");
@@ -1773,33 +1784,56 @@ Content-Type: application/json
 %}
 
 ### 4.28c 支付回调幂等（第3步：首次回调 → 期望 data=true）
+# 【6.0.2 起必须签名】下面的预请求脚本用 IDEA HTTP Client 的 crypto API 现算签名：
+#   payload = orderNo|tradeNo|timestamp（毫秒）
+#   sign    = HMAC-SHA256(payload, PAY_CALLBACK_SECRET) 十六进制小写
+# 脚本里的密钥取自 {{pay_callback_secret}}（见 0.0 与文件头注意事项 9），必须与后端一致。
+> {%
+    const tradeNo = "TRADE-ACCEPT-001";
+    const ts = Date.now();
+    const payload = client.global.get("o7_no") + "|" + tradeNo + "|" + ts;
+    const sign = crypto.hmac.sha256()
+        .withTextSecret(client.global.get("pay_callback_secret"))
+        .updateWithText(payload)
+        .digest()
+        .toHex()
+        .toLowerCase();
+    client.global.set("cb_ts", ts);
+    client.global.set("cb_sign", sign);
+%}
 POST {{base}}/order/pay/callback
 Content-Type: application/json
 
 {
   "orderNo": "{{o7_no}}",
-  "tradeNo": "TRADE-ACCEPT-001"
+  "tradeNo": "TRADE-ACCEPT-001",
+  "timestamp": {{cb_ts}},
+  "sign": "{{cb_sign}}"
 }
 
 > {%
     client.test("4.28a 首次支付回调 → data=true", function () {
-        client.assert(response.body.code === 200, "code 应为 200，实际 " + response.body.code);
+        client.assert(response.body.code === 200, "code 应为 200，实际 " + response.body.code + " / " + response.body.msg);
         client.assert(response.body.data === true, "首次回调 data 应为 true，实际 " + response.body.data);
     });
 %}
 
 ### 4.28d 支付回调幂等（第4步：重复回调 → 期望 data=false）
+# 刻意【不重新签名】：复用 4.28c 的 timestamp 与 sign，构成"同一笔回调被重放"的真实场景
+#（验签通过 → 命中 Redis 去重键 pay:callback:{orderNo}:{tradeNo} → data=false）。
 POST {{base}}/order/pay/callback
 Content-Type: application/json
 
 {
   "orderNo": "{{o7_no}}",
-  "tradeNo": "TRADE-ACCEPT-001"
+  "tradeNo": "TRADE-ACCEPT-001",
+  "timestamp": {{cb_ts}},
+  "sign": "{{cb_sign}}"
 }
 
 > {%
     client.test("4.28b 重复支付回调 → data=false（幂等去重）", function () {
-        client.assert(response.body.code === 200, "code 应为 200，实际 " + response.body.code);
+        client.assert(response.body.code === 200, "code 应为 200，实际 " + response.body.code + " / " + response.body.msg);
         client.assert(response.body.data === false, "重复回调 data 应为 false，实际 " + response.body.data);
     });
 %}

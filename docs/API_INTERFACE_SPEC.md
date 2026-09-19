@@ -108,7 +108,7 @@
 | 4.3 | GET | `/api/v1/order/list` | 强制认证 | `status?` `role?`(buyer/seller) `page` `size` | `data`: 分页 `OrderVO`（含 `product_title` 快照） |
 | 4.4 | GET | `/api/v1/order/detail/{id}` | 强制认证 | - | `data`: `OrderDetailVO`；归属校验失败 203；商品已逻辑删除时用自定义 SQL 绕过逻辑删除取商品信息 |
 | 4.5 | PUT | `/api/v1/order/pay/{id}` | 强制认证（买家） | - | `status: 0→1`，`pay_time=NOW()`；冲突 209 |
-| 4.6 | POST | `/api/v1/order/pay/callback` | 公开（签名校验） | body: `orderNo` `tradeNo` `payTime` | 幂等：`order_no + 回调流水号` 去重 |
+| 4.6 | POST | `/api/v1/order/pay/callback` | 公开（**HMAC-SHA256 验签**，批次 6.0.2 · S3） | body: `orderNo` `tradeNo` `timestamp`(毫秒) `sign`(**HMAC-SHA256 十六进制小写**) | 校验顺序：时间戳在 `app.pay.timestamp-window-seconds`(默认 300s) 内 → `sign` 非空 → HMAC 匹配 → 订单存在；任一失败 **code=100「回调签名校验失败」且不改状态**。`sign = HMAC-SHA256(orderNo+"|"+tradeNo+"|"+timestamp, PAY_CALLBACK_SECRET)`；通过后按 `order_no + 回调流水号` 幂等去重。未配置 `PAY_CALLBACK_SECRET` 时回调一律拒绝（fail-closed）。**遗留：payload 不含金额，接真实网关前必须补** |
 | 4.7 | PUT | `/api/v1/order/cancel/{id}` | 强制认证（买家） | `reason?` | `status: 0→4`，`cancel_by=买家ID` + **库存回补**；买家仅可取消 status=0 |
 | 4.8 | PUT | `/api/v1/order/ship/{id}` | 强制认证（卖家） | - | `status: 1→2`，`ship_time=NOW()`，仅 `trade_type IN (2,3)`；面交发货 → 209 |
 | 4.9 | PUT | `/api/v1/order/receive/{id}` | 强制认证（买家） | - | 邮寄 `2→3`；面交 `1→3`（`trade_type=1`）；`finish_time=NOW()` |

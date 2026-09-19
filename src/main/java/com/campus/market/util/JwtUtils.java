@@ -1,6 +1,7 @@
 package com.campus.market.util;
 
 import com.campus.market.common.constant.ProfileConstants;
+import com.campus.market.common.constant.SecretGenerationHints;
 import com.campus.market.config.properties.JwtProperties;
 import com.campus.market.entity.User;
 import io.jsonwebtoken.Claims;
@@ -93,7 +94,8 @@ public class JwtUtils {
     static void validateSecret(String secret, String[] activeProfiles) {
         if (secret == null || secret.isBlank()) {
             throw new IllegalStateException(
-                    "JWT secret 必须通过环境变量 JWT_SECRET 注入（当前为空）");
+                    "JWT secret 必须通过环境变量 JWT_SECRET 注入（当前为空）\n"
+                            + SecretGenerationHints.KEY_GENERATION_COMMANDS);
         }
         // ⚠️ 实测结论（6.0.1）：application-prod.yml 里的 `secret: ${JWT_SECRET}` 在环境变量缺失时
         //    **不会**让 Spring 抛"占位符无法解析"，而是把字面量 "${JWT_SECRET}" 直接绑定到
@@ -102,18 +104,20 @@ public class JwtUtils {
         if (secret.startsWith("${")) {
             throw new IllegalStateException(
                     "JWT secret 未注入：app.jwt.secret 的值仍是未替换的占位符 " + secret
-                            + "，请设置环境变量 JWT_SECRET（>= 32 字节随机值，例如 openssl rand -base64 48）");
+                            + "，请设置环境变量 JWT_SECRET（>= 32 字节随机值）\n"
+                            + SecretGenerationHints.KEY_GENERATION_COMMANDS);
         }
         if (secret.getBytes(StandardCharsets.UTF_8).length < MIN_SECRET_BYTES) {
             throw new IllegalStateException(
                     "JWT secret 必须通过环境变量注入且长度不少于 " + MIN_SECRET_BYTES + " 字节"
-                            + "（当前 " + secret.getBytes(StandardCharsets.UTF_8).length + " 字节）");
+                            + "（当前 " + secret.getBytes(StandardCharsets.UTF_8).length + " 字节）\n"
+                            + SecretGenerationHints.KEY_GENERATION_COMMANDS);
         }
         if (ProfileConstants.isProd(activeProfiles) && DEV_DEFAULT_SECRET.equals(secret)) {
             throw new IllegalStateException(
                     "生产环境(prod)禁止使用仓库内置的 dev 默认 JWT 密钥 —— 该密钥已随公开仓库泄露，"
-                            + "任何人可用它伪造管理员 Token。请通过环境变量 JWT_SECRET 注入一个 >= 32 字节的随机密钥"
-                            + "（例如 openssl rand -base64 48 的输出）");
+                            + "任何人可用它伪造管理员 Token。请通过环境变量 JWT_SECRET 注入一个 >= 32 字节的随机密钥\n"
+                            + SecretGenerationHints.KEY_GENERATION_COMMANDS);
         }
     }
 

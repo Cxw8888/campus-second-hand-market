@@ -4,6 +4,7 @@ import com.campus.market.common.result.PageResult;
 import com.campus.market.dto.order.OrderCancelRequest;
 import com.campus.market.dto.order.OrderCreateRequest;
 import com.campus.market.dto.order.OrderQuery;
+import com.campus.market.dto.order.PayCallbackRequest;
 import com.campus.market.dto.order.RefundApplyRequest;
 import com.campus.market.dto.order.RefundRejectRequest;
 import com.campus.market.vo.OrderCreateVO;
@@ -40,11 +41,18 @@ public interface OrderService {
     OrderVO pay(Long id);
 
     /**
-     * 模拟支付回调（按 {@code order_no + tradeNo} 幂等去重，重复回调直接返回成功）。
+     * 模拟支付回调（批次 6.0.2 起<b>必须先通过 HMAC 验签</b>，再按 {@code order_no + tradeNo} 幂等去重）。
+     *
+     * <p>校验顺序：① 时间戳不为空且在窗口内 → ② 签名不为空 → ③ HMAC 匹配 →
+     * ④ 订单存在 → ⑤ 幂等去重 → ⑥ 状态机 0→1。①②③④ 任一失败返回 code=100「回调签名校验失败」，
+     * <b>绝不修改订单状态、也不占用去重键</b>（否则未通过验签的请求能把合法回调"顶掉"）。</p>
+     *
+     * <p>本批遗留：签名 payload 不含金额（{@code PayCallbackRequest} 无 amount 字段），
+     * 真实网关接入前必须补上金额校验，见下一批 P0 项。</p>
      *
      * @return true 表示本次回调完成了状态流转，false 表示重复回调（已处理过）
      */
-    boolean handlePayCallback(String orderNo, String tradeNo);
+    boolean handlePayCallback(PayCallbackRequest request);
 
     /** 买家主动取消（0→4，cancel_by=买家ID）+ 库存回补。 */
     OrderVO cancel(Long id, OrderCancelRequest request);

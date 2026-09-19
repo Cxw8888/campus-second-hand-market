@@ -1,10 +1,12 @@
 package com.campus.market.service;
 
 import com.campus.market.common.enums.AuditOperationType;
+import com.campus.market.config.properties.TrustedProxyProperties;
 import com.campus.market.entity.AuditLog;
 import com.campus.market.mapper.AuditLogMapper;
 import com.campus.market.security.LoginUser;
 import com.campus.market.security.UserContext;
+import com.campus.market.util.IpUtils;
 import jakarta.servlet.http.HttpServletRequest;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
@@ -35,6 +37,9 @@ public class AdminAuditService {
     private static final int RESULT_FAIL = 0;
 
     private final AuditLogMapper auditLogMapper;
+
+    /** 可信代理列表（批次 6.0.2 · M1）：为空表示不采信任何转发头，避免审计 IP 被伪造。 */
+    private final TrustedProxyProperties trustedProxyProperties;
 
     /**
      * 写入审计日志（与业务同事务；失败降级）。
@@ -89,7 +94,9 @@ public class AdminAuditService {
                 return null;
             }
             HttpServletRequest request = attributes.getRequest();
-            return com.campus.market.util.IpUtils.getClientIp(request);
+            // 批次 6.0.2 · M1：只在可信代理之后才采信 X-Forwarded-For，否则审计日志里的 IP
+            // 就是攻击者随手写的一个字符串（自审报告 M1 的同一处根因）。
+            return IpUtils.getClientIp(request, trustedProxyProperties.getTrustedProxies());
         } catch (Exception e) {
             return null;
         }

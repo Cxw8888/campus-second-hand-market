@@ -28,7 +28,8 @@ import java.util.Arrays;
  * <h3>三类路径语义（关键）</h3>
  * <ol>
  *   <li><b>完全公开</b>：/actuator/health、/actuator/prometheus、/swagger-ui/**、/v3/api-docs/** 等 ——
- *       直接放行，<b>不解析 Token</b>。</li>
+ *       直接放行，<b>不解析 Token</b>。该集合由 {@link PublicPathResolver} 按 profile 解析：
+ *       prod 下会摘除接口文档相关路径（批次 6.0.2 · M7-a）。</li>
  *   <li><b>可选认证</b>：/api/v1/product/detail/**、/api/v1/product/list、/api/v1/category/list ——
  *       尝试解析 Token：存在且有效则注入 {@link UserContext}；不存在 / 无效 / 过期一律<b>静默放行</b>，不报错。</li>
  *   <li><b>强制认证</b>：其余全部 /api/v1/** —— 必须携带有效 Token，否则抛 401 → HTTP 401。
@@ -53,13 +54,16 @@ public class AuthInterceptor implements HandlerInterceptor {
     private final UserMapper userMapper;
     private final TokenVersionService tokenVersionService;
     private final LocalJwtBlacklist localJwtBlacklist;
+    /** 完全公开路径（批次 6.0.2 · M7-a）：prod 下不含接口文档路径。 */
+    private final PublicPathResolver publicPathResolver;
 
     @Override
     public boolean preHandle(HttpServletRequest request, HttpServletResponse response, Object handler) {
         String uri = request.getRequestURI();
 
         // ---------- ① 完全公开：不解析 Token，直接放行 ----------
-        if (matchAny(PathConstants.PUBLIC_PATHS, uri)) {
+        // 路径集合按 profile 解析（prod 摘除 /doc.html、/swagger-ui/**、/v3/api-docs/** 等）
+        if (matchAny(publicPathResolver.publicPaths(), uri)) {
             return true;
         }
         if (request.getMethod().equalsIgnoreCase("OPTIONS")) {

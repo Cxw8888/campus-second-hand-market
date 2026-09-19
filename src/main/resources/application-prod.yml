@@ -5,6 +5,30 @@ spring:
     username: ${DB_USERNAME}
     password: ${DB_PASSWORD}
 
+  # ---------------- Redis（批次 6.0.2 · M7-b） ----------------
+  data:
+    redis:
+      # 若 Redis 可被外部访问（公网/跨网段/未做安全组隔离），必须通过环境变量 REDIS_PASSWORD 注入口令。
+      # 本批【故意保留空默认值、也不加启动断言】：Redis 部署在内网（Docker 网络、本机 127.0.0.1、
+      # 内网 IP）时"无口令"是完全正常的形态，加了断言会让这类合法部署假失败；
+      # 而 Redis 的暴露面本质上是"网络可达性"问题，应该由安全组/防火墙/绑定地址解决，
+      # 应用层一个开关无法覆盖（例如运维可能用 ACL 用户名+口令，形态与 password 不同）。
+      # 取舍详见批次 6.0.2 报告「三、技术要点 · M7-b」。
+      password: ${REDIS_PASSWORD:}
+
+# ---------------- 接口文档: 生产关闭（批次 6.0.2 · M7-a） ----------------
+# 自审报告 M7：knife4j 默认开启 + /doc.html、/v3/api-docs/** 在公开路径里 → 公网可枚举全部接口契约
+# （含 /api/v1/admin/** 的 60 个接口签名）。生产环境这三项一起关，接口文档端点直接不存在。
+# 注意：真正的"关掉"靠这三行配置开关；PublicPathResolver 在 prod 摘除文档路径是第二道防线。
+springdoc:
+  api-docs:
+    enabled: false
+  swagger-ui:
+    enabled: false
+
+knife4j:
+  enable: false
+
 app:
   jwt:
     # 【安全加固 6.0.1 · S1】这里【故意不写默认值】: 未注入 JWT_SECRET 时不会退回到
@@ -13,7 +37,9 @@ app:
     #      "${JWT_SECRET}" 绑定到 JwtProperties.secret 上 —— 真正拦下启动的是
     #      JwtUtils.init() 的启动断言（它会识别这种未替换的占位符并报明确错误）。
     #      两道防线缺一不可：配置层保证"拿不到安全密钥"，断言层保证"绝不带着不安全密钥启动"。
-    # 生成方式: openssl rand -base64 48
+    # 生成方式（任选一行）:
+    #   Linux/macOS       : openssl rand -base64 48
+    #   Windows PowerShell: [Convert]::ToBase64String((1..48 | ForEach-Object { Get-Random -Max 256 }))
     secret: ${JWT_SECRET}
 
   # 生产环境必须关闭降级开关, 走真实 SMTP
@@ -23,6 +49,28 @@ app:
     # 背景: skip=true 时验证码不再发送，而是（在 dev 下）进响应体，
     #       /auth/email-code 与 /auth/reset-password 都是公开路径 → 任意账号可被接管。
     skip: ${EMAIL_SKIP:false}
+
+  # ---------------- 支付回调验签（批次 6.0.2 · S3） ----------------
+  pay:
+    # 【安全加固 6.0.2 · S3】同样【故意不写默认值】：
+    #   未注入 PAY_CALLBACK_SECRET 时，字面量 "${PAY_CALLBACK_SECRET}" 会被绑到
+    #   PayProperties.callbackSecret 上，由 PayCallbackSignService 的启动断言识别并中止启动。
+    #   为什么必须 fail-fast 而不是"空密钥就跳过验签"：这条路径是公开的，
+    #   一旦带着"跳过验签"上线，知道 orderNo 的人就能把任意订单改成已支付。
+    # 生成方式（任选一行）:
+    #   Linux/macOS       : openssl rand -base64 48
+    #   Windows PowerShell: [Convert]::ToBase64String((1..48 | ForEach-Object { Get-Random -Max 256 }))
+    callback-secret: ${PAY_CALLBACK_SECRET}
+    timestamp-window-seconds: 300
+
+  # 可信反向代理列表（批次 6.0.2 · M1）：生产环境【按实际部署填写】。
+  # 留空（不写 key）= 不采信任何 X-Forwarded-For，一律使用 RemoteAddr —— 直连部署即此形态，
+  # 也是最安全的默认值。若前面有 nginx / SLB，请把【代理自身地址】填进来，例如：
+  #   security:
+  #     trusted-proxies:
+  #       - 10.0.0.0/8
+  #       - 172.17.0.0/16        # 例：Docker 默认网桥
+  # ⚠️ 不要把 0.0.0.0/0 或 公网段 填进来 —— 那等于重新打开"伪造 XFF 绕过 IP 限流"的口子。
 
   cors:
     # 严禁使用 *

@@ -338,3 +338,56 @@ X.8 测试结论
 	✅ 数据统计页面：4 概览卡片 + 2 分布图 + 趋势折线图（7/30 天切换）+ 热门榜 Top 10（23 个组件用例 + 真实 ECharts SSR 渲染断言）
 	⚠️ 浏览器目视走查未执行（本机无浏览器自动化）：/admin 跳转与仪表盘视觉请按 5.5.1 的方式确认一次；
 	   注意后端需重启到 5.5.2 及其后代码，否则统计接口会 404
+
+===============================================================
+6.0.2 安全加固批测试结果（S3 支付回调验签 + M1 IP/账号计数 + M7 生产配置收敛）
+===============================================================
+测试时间	2026-09-19 14:03 ~ 14:08
+测试范围	S3（回调 HMAC 验签）、M1（XFF 可信代理 + 账号计数归一化）、M7-a（prod 关接口文档）、
+	M7-b（prod Redis 口令配置）、任务 E（报错文案补 PowerShell 生成命令）
+测试环境	Windows 11 / OpenJDK 21.0.12 / MySQL 8.0.46 / Redis 5.0.14 / Node v22.23.2
+
+一、后端编译与单测
+命令	javac -parameters（153 个主源文件）+ 20 个测试类，JUnit Platform Launcher 运行（-Djdk.attach.allowAttachSelf=true）
+结果	119 / 119 通过（0 失败 0 跳过）；批次前实测基数 94（119 − 25），
+	与 5.5.3 记录的 80 不一致（历史记录口径问题，本批以实测为准）
+新增用例	25 个（5 个新测试类 24 个 + 既有 JwtUtilsSecretValidationTest 追加 1 个）：
+	PayCallbackVerificationTest 5（S3：无签名/错签名/过期时间戳 → code=100；正确签名 → 200 且 0→1；订单不存在同文案）
+	PayCallbackSignServiceGuardTest 5（S3 启动断言：prod 空/占位符/长度不足 → 拒绝启动；dev 空放行；文案含双平台命令）
+	AuthLoginSecurityTest 5（M1：伪造 XFF 不改 IP 计数 Key；Admin/admin/aDmIn 同一 Key；归一化规则；TTL 回归）
+	IpUtilsTest 6（M1：无可信代理忽略转发头、链式 XFF 取最右不可信、CRLF/超长清洗、CIDR 边界、unknown）
+	PublicPathResolverTest 3（M7-a：dev 全集；prod 恰好摘除 6 条文档路径；docPaths() 副本不可污染）
+	JwtUtilsSecretValidationTest ⑧（任务 E：四条失败文案都含 openssl 与 PowerShell 两行）
+
+二、5 个真实启动场景（均为 java -cp 直启，非单元测试）
+a	dev 正常启动（18080）；/doc.html=200、/v3/api-docs=200（56KB 契约）、/swagger-ui/index.html=200
+b	prod 缺 PAY_CALLBACK_SECRET → 启动失败：IllegalStateException「支付回调密钥未注入：… 仍是未替换的占位符 ${PAY_CALLBACK_SECRET}」
+	（实测复现 6.0.1 的结论：Spring 不抛占位符解析异常，而是把字面量绑到字段上，由启动断言拦下）
+c	prod + PAY_CALLBACK_SECRET="dev"（3 字节）→ 启动失败「长度不足：必须 >= 32 字节（当前 3 字节）」
+	prod + PAY_CALLBACK_SECRET=" "（空白）→ 启动失败「生产环境(prod)必须通过环境变量 PAY_CALLBACK_SECRET 注入」
+d	prod 全配好 → 正常启动（18081）；/doc.html、/v3/api-docs、/swagger-ui/**、/webjars/** 全部
+	code=100「请求的接口不存在」；/api/v1/category/list 正常 200（业务接口未受影响）
+	⚠️ 重要实测：只配 knife4j.enable=false + springdoc.*.enabled=false 时，/doc.html 仍返回 200 ——
+	  它是 knife4j jar 内 META-INF/resources/doc.html 的静态资源，与开关无关；故本批补了 prod 专用
+	  封禁拦截器（ApiDocGuardInterceptor），封禁后才是上面的结果
+
+三、支付回调验签实测（真实 HTTP，prod 实例 + 真实 MySQL，本机 PowerShell 独立实现 HMAC 交叉验证）
+	请求	/tmp 说明	HTTP	body.code	订单 status
+	无签名	只传 orderNo+tradeNo	200	100「回调签名校验失败」	0（未变）
+	错签名	sign=64 个 '0'	200	100「回调签名校验失败」	0（未变）
+	过期时间戳	签名正确但 timestamp = now-360000（6 分钟前）	200	100「回调签名校验失败」	0（未变）
+	正确签名	HMAC 与后端一致	200	200「支付成功」data=true	1（pay_time 落库）
+	重放同一请求	与上一条完全相同	200	200「请勿重复回调」data=false	1（未重复流转）
+	旁证	卖家收到站内信「买家已支付订单「…」，请尽快发货或约定面交」；服务端日志分别记录
+	「签名为空 / 签名不匹配 / 时间戳超出允许窗口(300s)」，对外只暴露一句统一文案
+	对照	dev 未配 PAY_CALLBACK_SECRET 时，带正确格式签名的回调同样返回 code=100（fail-closed，不"跳过验签放行"）
+
+四、前端门禁（本批未改动任何前端文件，作回归确认）
+命令	npx vitest run
+结果	17 个文件 / 177 个用例全绿（与 5.5.3 一致，无新增无回归）
+
+五、M1 修复后的实测行为
+	登录失败时 IP 维度计数 Key 落在 RemoteAddr（XFF 伪造值被忽略）：日志 username=admin, ip=203.0.113.9
+	可信代理命中时（app.security.trusted-proxies 含直连地址）才采信 XFF 链，且取最右侧不可信地址
+	账号大小写变体（Admin/admin/aDmIn/  ADMIN  ）四次失败全部累计到 login:fail:admin 同一个 Key
+

@@ -113,4 +113,17 @@ class JwtUtilsSecretValidationTest {
         assertThatCode(() -> JwtUtils.validateSecret(JwtUtils.DEV_DEFAULT_SECRET, null))
                 .doesNotThrowAnyException();
     }
+
+    @Test
+    @DisplayName("⑧ 报错文案必须同时给出 openssl 与 PowerShell 两行密钥生成命令（批次 6.0.2 · 任务 E）")
+    void failureMessagesShouldContainBothPlatformCommands() {
+        // 背景：本项目开发/答辩环境是 Windows，文案里只写 openssl 等于让人先去装一个 openssl。
+        // 这里把"两条命令都在"变成断言，避免以后改文案时又被删回一行。
+        for (String secret : new String[]{null, "short", "${JWT_SECRET}", JwtUtils.DEV_DEFAULT_SECRET}) {
+            assertThatThrownBy(() -> JwtUtils.validateSecret(secret, PROD))
+                    .isInstanceOf(IllegalStateException.class)
+                    .hasMessageContaining("Linux/macOS: openssl rand -base64 48")
+                    .hasMessageContaining("Windows PowerShell: [Convert]::ToBase64String((1..48 | ForEach-Object { Get-Random -Max 256 }))");
+        }
+    }
 }

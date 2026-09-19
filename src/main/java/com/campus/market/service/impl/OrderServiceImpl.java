@@ -11,6 +11,7 @@ import com.campus.market.config.properties.OrderProperties;
 import com.campus.market.dto.order.OrderCancelRequest;
 import com.campus.market.dto.order.OrderCreateRequest;
 import com.campus.market.dto.order.OrderQuery;
+import com.campus.market.dto.order.PayCallbackRequest;
 import com.campus.market.dto.order.RefundApplyRequest;
 import com.campus.market.dto.order.RefundRejectRequest;
 import com.campus.market.entity.Order;
@@ -22,6 +23,7 @@ import com.campus.market.security.UserContext;
 import com.campus.market.service.NotificationSender;
 import com.campus.market.service.OrderService;
 import com.campus.market.service.OrderTokenService;
+import com.campus.market.service.PayCallbackSignService;
 import com.campus.market.service.StockService;
 import com.campus.market.vo.OrderCreateVO;
 import com.campus.market.vo.OrderTokenVO;
@@ -59,6 +61,8 @@ public class OrderServiceImpl implements OrderService {
     private final NotificationSender notificationSender;
     private final OrderProperties orderProperties;
     private final StringRedisTemplate redisTemplate;
+    /** 支付回调验签（批次 6.0.2 · S3）。 */
+    private final PayCallbackSignService payCallbackSignService;
 
     // ================================================================ 下单
 
@@ -154,8 +158,27 @@ public class OrderServiceImpl implements OrderService {
 
     @Override
     @Transactional(rollbackFor = Exception.class)
-    public boolean handlePayCallback(String orderNo, String tradeNo) {
-        // 幂等：order_no + 回调流水号 去重，重复回调直接返回成功
+    public boolean handlePayCallback(PayCallbackRequest request) {
+        String orderNo = request.getOrderNo();
+        String tradeNo = request.getTradeNo();
+
+        // ① 验签（时间戳窗口 → 签名非空 → HMAC-SHA256 常量时间比对）
+        //    ⚠️ 批次 6.0.2 · S3：修前本方法只做去重 + 状态机，任何人知道 orderNo 就能把订单 0→1。
+        //    验签放在最前面，不通过即抛 code=100，绝不进入后面的任何写操作。
+        payCallbackSignService.verify(orderNo, tradeNo, request.getTimestamp(), request.getSign());
+
+        // ② 订单存在（按 orderNo 查）；找不到同样按"回调签名校验失败"拒绝 ——
+        //    对外不暴露"这个 orderNo 存不存在"，避免回调接口变成订单号探测器。
+        Order order = orderMapper.selectOne(Wrappers.<Order>lambdaQuery()
+                .eq(Order::getOrderNo, orderNo));
+        if (order == null) {
+            log.warn("支付回调拒绝: 订单不存在, orderNo={}", orderNo);
+            throw new BusinessException(ErrorCode.PARAM_ERROR, PayCallbackSignService.VERIFY_FAILED_MSG);
+        }
+
+        // ③ 幂等：order_no + 回调流水号 去重，重复回调直接返回成功
+        //    ⚠️ 必须在验签之后才写去重键：否则未通过验签的请求会先占位，
+        //    把随后到达的合法回调当成"重复回调"吞掉（自审报告 Minor 9 同源问题）。
         String dedupKey = RedisKeys.PAY_CALLBACK_PREFIX + orderNo + ":" + tradeNo;
         Boolean first = null;
         try {
@@ -169,12 +192,6 @@ public class OrderServiceImpl implements OrderService {
             return false;
         }
 
-        Order order = orderMapper.selectOne(Wrappers.<Order>lambdaQuery()
-                .eq(Order::getOrderNo, orderNo));
-        if (order == null) {
-            log.warn("支付回调订单不存在: orderNo={}", orderNo);
-            return false;
-        }
         if (order.getStatus() != null && order.getStatus() == OrderStatus.PAID) {
             // 状态机幂等：已支付则视为成功
             return false;
@@ -187,6 +204,7 @@ public class OrderServiceImpl implements OrderService {
         }
         notificationSender.sendAsync(order.getSellerId(), NOTIFICATION_TYPE_ORDER, BIZ_TYPE_ORDER, order.getId(),
                 "买家已支付订单「" + order.getProductTitle() + "」，请尽快发货或约定面交");
+        log.info("支付回调验签通过并完成支付: orderNo={}, tradeNo={}, orderId={}", orderNo, tradeNo, order.getId());
         return true;
     }
 

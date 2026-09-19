@@ -1,10 +1,14 @@
 package com.campus.market.config;
 
+import com.campus.market.common.constant.ProfileConstants;
 import com.campus.market.config.properties.StorageProperties;
+import com.campus.market.security.ApiDocGuardInterceptor;
 import com.campus.market.security.AuthInterceptor;
+import com.campus.market.security.PublicPathResolver;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.context.annotation.Configuration;
+import org.springframework.core.env.Environment;
 import org.springframework.web.servlet.config.annotation.InterceptorRegistry;
 import org.springframework.web.servlet.config.annotation.ResourceHandlerRegistry;
 import org.springframework.web.servlet.config.annotation.WebMvcConfigurer;
@@ -28,6 +32,9 @@ public class WebMvcConfig implements WebMvcConfigurer {
 
     private final AuthInterceptor authInterceptor;
     private final StorageProperties storageProperties;
+    /** 生产环境封禁接口文档路径（批次 6.0.2 · M7-a）。 */
+    private final ApiDocGuardInterceptor apiDocGuardInterceptor;
+    private final Environment environment;
 
     @Override
     public void addInterceptors(InterceptorRegistry registry) {
@@ -41,6 +48,18 @@ public class WebMvcConfig implements WebMvcConfigurer {
                         "/api/v1/auth/reset-password",
                         "/api/v1/order/pay/callback"
                 );
+
+        // ---------------- 批次 6.0.2 · M7-a：生产环境封禁接口文档路径 ----------------
+        // 背景（实测）：application-prod.yml 的 knife4j.enable=false 能关掉 /v3/api-docs 与
+        // /swagger-ui/**，但 /doc.html 是 knife4j jar 里的静态资源，仍然返回 200。
+        // 只关配置开关 = 留着一个可被扫描到的文档页；故 prod 下对文档路径统一按"接口不存在"处理。
+        // 注意：AuthInterceptor 只挂在 /api/v1/**，文档路径根本不在它的管辖范围内，
+        // 所以这一步必须单独注册，不能指望 PUBLIC_PATHS 的"摘除"生效（那是第二道防线）。
+        if (ProfileConstants.isProd(environment.getActiveProfiles())) {
+            String[] docPaths = PublicPathResolver.docPaths();
+            registry.addInterceptor(apiDocGuardInterceptor).addPathPatterns(docPaths);
+            log.info("生产环境(prod)：已封禁接口文档路径 {}", String.join(", ", docPaths));
+        }
     }
 
     /**
