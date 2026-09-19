@@ -25,7 +25,7 @@ import com.campus.market.service.OrderService;
 import com.campus.market.service.OrderTokenService;
 import com.campus.market.service.PayCallbackSignService;
 import com.campus.market.service.StockService;
-import com.campus.market.util.TransactionHelper;
+import com.campus.market.service.support.PayCallbackProcessor;
 import com.campus.market.vo.OrderCreateVO;
 import com.campus.market.vo.OrderTokenVO;
 import com.campus.market.vo.OrderVO;
@@ -64,6 +64,12 @@ public class OrderServiceImpl implements OrderService {
     private final StringRedisTemplate redisTemplate;
     /** 支付回调验签（批次 6.0.2 · S3）。 */
     private final PayCallbackSignService payCallbackSignService;
+
+    /**
+     * 支付回调的状态机部分（独立 Bean：Spring 的 @Transactional 走代理，
+     * 同类自调用不会开事务，见 {@link PayCallbackProcessor} 的类注释）。
+     */
+    private final PayCallbackProcessor payCallbackProcessor;
 
     // ================================================================ 下单
 
@@ -157,18 +163,51 @@ public class OrderServiceImpl implements OrderService {
         return reloadVO(id);
     }
 
+    /**
+     * 模拟支付回调（公开路径）。
+     *
+     * <h3>校验顺序（S3 遗留批固定下来的契约）</h3>
+     * <pre>
+     * 【事务外】
+     *   ① 参数校验（Controller 的 @Valid：orderNo/tradeNo 非空、amount 非空且 0.01~99999999.99）
+     *   ② 验签（时间戳窗口 → 签名非空 → HMAC 含金额的 payload 常量时间比对）
+     *   ③ 查订单（不存在 → 统一文案「回调签名校验失败」）
+     *   ④ 金额比对（compareTo 不等 → 同一句统一文案）
+     *   ⑤ 幂等去重读侧（Redis hasKey 快路径）
+     *   ⑥ 状态判断（1-已支付 → 幂等返回；其余非 0 → 209）
+     * 【事务内】（{@link PayCallbackProcessor#payOne}，独立 Bean 才有事务）
+     *   ⑦ 状态机 0→1 + 通知卖家
+     * 【提交后】
+     *   ⑧ 落去重键
+     * </pre>
+     *
+     * <p><b>为什么不带 {@code @Transactional}</b>：②③④ 是纯计算 / 一次只读查询，
+     * 放在事务里只会让验签期间也占着连接；写库只有 ⑦ 一步，交给
+     * {@link PayCallbackProcessor}（独立 Bean，避免同类自调用导致事务失效）。</p>
+     *
+     * <p><b>为什么金额比对必须在查订单之后</b>：金额的"期望值"来自订单本身
+     * （{@code tb_order.amount} 是下单时的快照），没有订单就无从比对；
+     * 而且必须在状态机之前 —— 金额不对说明是异常请求，即便订单已支付也要拒绝（不能走幂等放行）。</p>
+     *
+     * <p><b>对外只暴露一句文案</b>：签名错 / 时间戳过期 / 订单不存在 / 金额不匹配
+     * 一律 {@code code=100「回调签名校验失败」}，真实原因只进 warn 日志，
+     * 否则这个公开接口会变成"orderNo 是否存在、金额是多少"的探测器。</p>
+     */
     @Override
-    @Transactional(rollbackFor = Exception.class)
     public boolean handlePayCallback(PayCallbackRequest request) {
         String orderNo = request.getOrderNo();
         String tradeNo = request.getTradeNo();
 
-        // ① 验签（时间戳窗口 → 签名非空 → HMAC-SHA256 常量时间比对）
+        // ① 参数校验：由 Controller 的 @Valid 完成（amount 的 @NotNull/@DecimalMin/@DecimalMax 也在那里）。
+        //    注意：amount 缺失/越界返回的是**字段文案**（如「支付金额不能为空」）而不是统一文案 ——
+        //    那属于"请求格式不对"，与"账目对不上"是两件事（详见 PayCallbackRequest 类注释）。
+
+        // ② 验签（时间戳窗口 → 签名非空 → HMAC 常量时间比对；payload 含金额且金额固定 2 位小数）
         //    ⚠️ 批次 6.0.2 · S3：修前本方法只做去重 + 状态机，任何人知道 orderNo 就能把订单 0→1。
         //    验签放在最前面，不通过即抛 code=100，绝不进入后面的任何写操作。
-        payCallbackSignService.verify(orderNo, tradeNo, request.getTimestamp(), request.getSign());
+        payCallbackSignService.verify(request);
 
-        // ② 订单存在（按 orderNo 查）；找不到同样按"回调签名校验失败"拒绝 ——
+        // ③ 订单存在（按 orderNo 查）；找不到同样按"回调签名校验失败"拒绝 ——
         //    对外不暴露"这个 orderNo 存不存在"，避免回调接口变成订单号探测器。
         Order order = orderMapper.selectOne(Wrappers.<Order>lambdaQuery()
                 .eq(Order::getOrderNo, orderNo));
@@ -177,17 +216,27 @@ public class OrderServiceImpl implements OrderService {
             throw new BusinessException(ErrorCode.PARAM_ERROR, PayCallbackSignService.VERIFY_FAILED_MSG);
         }
 
-        // ③ 幂等：order_no + 回调流水号 去重。
+        // ④ 金额比对（S3 遗留批新增）：签名覆盖了 amount，但那只证明"这个金额是持密钥方签的"，
+        //    还要证明"它确实等于这笔订单该付的钱" —— 否则拿到密钥的人可以签一个 0.01 的回调把小额订单"
+        //    象征性"付掉，或签一个巨额回调污染对账数据。
+        //    必须用 compareTo：BigDecimal.equals 会把 45.00 与 45.0 判为不等（scale 参与比较）。
+        //    失败文案与其它校验失败完全一致，日志里才有期望值/实际值。
+        if (order.getAmount() == null || request.getAmount().compareTo(order.getAmount()) != 0) {
+            log.warn("支付回调金额不匹配: orderNo={}, 期望={}, 实际={}",
+                    orderNo, order.getAmount(), request.getAmount());
+            throw new BusinessException(ErrorCode.PARAM_ERROR, PayCallbackSignService.VERIFY_FAILED_MSG);
+        }
+
+        // ⑤ 幂等去重（读侧快路径）。去重键必须在这里就判定，理由见下方注释块。
         //
         //    ⚠️ 两条历史教训叠在这里，缺一条都会出问题：
         //    ①（6.0.2）去重<b>必须在验签之后</b>：否则未通过验签的请求会先占位，
         //      把随后到达的合法回调当成"重复回调"吞掉；
-        //    ②（6.0.6 · Minor 9）去重键的<b>写入必须在事务提交之后</b>：
-        //      修前在事务内 SETNX，事务一旦回滚（后续状态机抛异常 / DB 抖动），
-        //      Key 已经占位而状态没变 —— 支付方按幂等重试同一笔流水，
-        //      会被当成"重复回调"直接 return false，<b>这笔支付永久丢失</b>且不报错。
-        //      现在：读侧在事务内判定（快路径），写侧走 TransactionHelper.runAfterCommit；
-        //      并发穿透由状态机兜底 —— pay 的 `WHERE status = 0` 保证只有一次能生效。
+        //    ②（6.0.6 · Minor 9）去重键的<b>写入必须在写库提交之后</b>：
+        //      修前在事务内 SETNX，事务一旦回滚，Key 已经占位而状态没变 ——
+        //      支付方按幂等重试同一笔流水会被当成"重复回调"直接 return false，
+        //      <b>这笔支付永久丢失</b>且不报错。
+        //      现在：读侧在此判定，写侧放在 payOne 返回之后（那时事务已经提交，见 ⑧）。
         String dedupKey = RedisKeys.PAY_CALLBACK_PREFIX + orderNo + ":" + tradeNo;
         try {
             if (Boolean.TRUE.equals(redisTemplate.hasKey(dedupKey))) {
@@ -199,31 +248,36 @@ public class OrderServiceImpl implements OrderService {
             log.warn("支付回调去重校验降级: orderNo={}, err={}", orderNo, e.getMessage());
         }
 
+        // ⑥ 状态判断（金额已经比对过，所以这里可以安全地按状态分流）
+        //    - 已支付：幂等返回 false → 控制器回 200「请勿重复回调」
+        //    - 其余（4-已取消 / 5-已冻结 / 6 / 7 …）：209「当前状态不允许此操作」
+        //      （S3 遗留批起由"静默返回 false"改为 209：真实状态冲突应当让调用方看得出来）
         if (order.getStatus() != null && order.getStatus() == OrderStatus.PAID) {
-            // 状态机幂等：已支付则视为成功
             return false;
         }
-        int rows = orderMapper.pay(order.getId());
-        if (rows == 0) {
-            // 非待支付状态（已取消/已冻结等），支付回调不再生效
-            log.warn("支付回调状态冲突, 已忽略: orderNo={}, status={}", orderNo, order.getStatus());
+        if (order.getStatus() == null || order.getStatus() != OrderStatus.PENDING_PAY) {
+            log.warn("支付回调状态不允许: orderNo={}, status={}", orderNo, order.getStatus());
+            throw new BusinessException(ErrorCode.STATUS_NOT_ALLOWED);
+        }
+
+        // ⑦ 状态机（独立 Bean → 每次调用一个事务）0→1 + 通知卖家
+        boolean processed = payCallbackProcessor.payOne(order);
+        if (!processed) {
+            // 并发下被别的回调抢先（或买家自己付掉）：按重复回调处理，不报错
             return false;
         }
 
-        // ③-b 事务提交后才落去重键：回滚不留下"占位但没生效"的键（Minor 9）
-        TransactionHelper.runAfterCommit(() -> {
-            try {
-                redisTemplate.opsForValue().set(dedupKey, "1", Duration.ofDays(7));
-            } catch (Exception e) {
-                // 写失败只影响"后续重复回调的去重"，状态机仍能兜住重复调用
-                log.warn("支付回调去重键写入失败（降级，靠状态机兜底）: orderNo={}, err={}",
-                        orderNo, e.getMessage());
-            }
-        });
+        // ⑧ 落去重键。放在 payOne 之后 = 事务已提交，天然满足"提交后才写键"（Minor 9）：
+        //    payOne 抛异常（回滚）时根本走不到这里，同一笔流水可以安全重试。
+        //    写失败只影响"后续重复回调的去重"，状态机仍能兜住重复调用。
+        try {
+            redisTemplate.opsForValue().set(dedupKey, "1", Duration.ofDays(7));
+        } catch (Exception e) {
+            log.warn("支付回调去重键写入失败（降级，靠状态机兜底）: orderNo={}, err={}", orderNo, e.getMessage());
+        }
 
-        notificationSender.sendAsync(order.getSellerId(), NOTIFICATION_TYPE_ORDER, BIZ_TYPE_ORDER, order.getId(),
-                "买家已支付订单「" + order.getProductTitle() + "」，请尽快发货或约定面交");
-        log.info("支付回调验签通过并完成支付: orderNo={}, tradeNo={}, orderId={}", orderNo, tradeNo, order.getId());
+        log.info("支付回调验签与金额校验通过并完成支付: orderNo={}, tradeNo={}, orderId={}, amount={}",
+                orderNo, tradeNo, order.getId(), order.getAmount());
         return true;
     }
 

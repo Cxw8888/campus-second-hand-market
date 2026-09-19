@@ -14,6 +14,7 @@ import com.campus.market.service.NotificationSender;
 import com.campus.market.service.OrderTokenService;
 import com.campus.market.service.PayCallbackSignService;
 import com.campus.market.service.StockService;
+import com.campus.market.service.support.PayCallbackProcessor;
 import com.campus.market.vo.OrderVO;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
@@ -92,7 +93,8 @@ class OrderFinishFaceBySellerTest {
     @BeforeEach
     void setUp() {
         orderService = new OrderServiceImpl(orderMapper, productMapper, orderTokenService, orderCreateService,
-                stockService, notificationSender, new OrderProperties(), redisTemplate, payCallbackSignService);
+                stockService, notificationSender, new OrderProperties(), redisTemplate, payCallbackSignService,
+                new PayCallbackProcessor(orderMapper, notificationSender));
         when(productMapper.selectByIdIgnoreLogicDelete(anyLong())).thenReturn(new Product());
     }
 
