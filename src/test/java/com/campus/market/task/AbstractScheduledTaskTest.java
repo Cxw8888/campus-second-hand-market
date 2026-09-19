@@ -71,6 +71,17 @@ abstract class AbstractScheduledTaskTest {
      * 可以直接指定成过去的任意时间，用来命中各任务的窗口条件。</p>
      */
     protected Order insertOrder(int status, int tradeType, LocalDateTime shipTime, LocalDateTime refundRejectTime) {
+        return insertOrder(status, tradeType, shipTime, refundRejectTime, null);
+    }
+
+    /**
+     * 造一条订单并落库（带 pay_time）。
+     *
+     * <p>批次 6.0.5.2 · C 起，自动确认收货也覆盖"已支付面交单"，判龄字段是 {@code pay_time}
+     * （面交不发货，没有 ship_time），因此测试需要能指定它。</p>
+     */
+    protected Order insertOrder(int status, int tradeType, LocalDateTime shipTime,
+                                LocalDateTime refundRejectTime, LocalDateTime payTime) {
         Order order = new Order();
         order.setOrderNo(snowflakeIdGenerator.nextOrderNo());
         order.setUserId(BUYER_ID);
@@ -84,6 +95,7 @@ abstract class AbstractScheduledTaskTest {
         order.setTradeType(tradeType);
         order.setShipTime(shipTime);
         order.setRefundRejectTime(refundRejectTime);
+        order.setPayTime(payTime);
         orderMapper.insert(order);
         return order;
     }

@@ -549,4 +549,76 @@ d	prod 全配好 → 正常启动（18081）；/doc.html、/v3/api-docs、/swagg
 五、数据清理核对
 	残留商品/订单/用户（本批 5 件商品 + 5 张订单 + 3 个测试用户）=0
 
+===============================================================
+6.0.5.2 安全加固批测试结果（M6 上传 + 定时任务 4 条 + 面交兜底）
+===============================================================
+测试时间	2026-09-19 15:30 ~ 16:05
+测试范围	M6（A1 防解压炸弹 / A2 上传配额 / A3 文件清理 / A4 缩略图用起来）、
+	定时任务 4 条（B1 阈值接线 / B2 lock-at-most-for 接线 / B3 提醒去重+窗口+LIMIT / B4 逐单事务）、
+	C 面交兜底自动完成（6.0.5.1 遗留的 B 方案）
+测试环境	Windows 11 / OpenJDK 21.0.12 / MySQL 8.0.46 / Redis 5.0.14 / Node v22.23.2 / Vite 5.4.11
+	真机实例：dev @18080（本次代码 java -cp 直启，APP_STORAGE_MAXFILESPERUSER=3）+ @SpringBootTest 集成测试
+
+一、后端编译与单测
+命令	javac -parameters（159 个主源文件）+ 42 个测试类，JUnit Platform Launcher 运行（-Djdk.attach.allowAttachSelf=true）
+结果	222 / 222 通过（0 失败 0 跳过）；批次前 184，本批新增 38
+新增用例	LocalStorageImageGuardTest 6（A1：PNG 解压炸弹 10000×10000 被头部校验拦下且不落盘；8000×7000 总像素超限；
+		正常图落盘 + 双份文件 + 记配额；配额已满时不落盘；WebP 无解码器；魔数不通过）
+	StorageQuotaServiceTest 8（A2：未超限放行 / 文件数超限 / 容量超限 / 记账 +1 / 删除退还且不为负 / Redis 降级 / 计数缺失 / 非法 userId）
+	ScheduledTasksPlumbingTest 11（B1 阈值来自配置；C 面交候选逐单处理 + 单批上限；B4 单条失败不影响其它（两个任务）；
+		B4 反射断言批方法无 @Transactional；B3 窗口 (6,8] + LIMIT；B3 SETNX 去重跳过；B3 首次发送并写 7 天标记；
+		B3 Redis 故障降级照发；B2 四个任务的 lockAtMostFor 必须是配置占位符）
+	ProductImageCleanupTest 5（A3：删商品清理图集 / 换图只删被替换的 / 被其它商品引用则不删 / 删除失败不阻塞业务 / 图未变不触发）
+	UserAvatarCleanupTest 4（A3：换头像删旧图 / 头像未变不删 / 未传 avatar 不删 / 删除失败不阻塞）
+	AutoConfirmCoverageTaskTest 1（B1+C 集成：配置 3 天时"已支付 4 天的面交单"自动完成并通知双方，
+		已支付 2 天的不动、邮寄待发货不动、邮寄发货 4 天仍按原规则确认）
+	RemindWindowIntegrationTest 1（B3 集成：窗口 (6,8] 命中 6.5 天与 7.5 天两张单、9 天与面交单不命中；
+		去重标记 TTL≈7 天；**同一任务连跑两次，第二次一条都不再发**）
+	ScheduledLockConfigurationWiringTest 2（B2 集成：用 ShedLock 自己的 extractor 断言解析结果 = 覆盖值 PT3M/PT7M/PT2M/PT4M；lockAtLeastFor 与锁名回归）
+
+二、M6 真机场景（dev @18080 + 真实磁盘 + 真实 Redis，配额上限设为 3 张）
+	a	M6-A1 解压炸弹	68 字节 PNG（IHDR 声明 10000×10000）上传 → **code=100「图片最大边长不能超过8192px」**，
+		进程无 OOM、未落盘、配额计数仍为空（修复前会在解码阶段申请数百 MB～数 GB）
+	b	M6-A2 上传配额	第 1~3 张 → code=200；**第 4 张 → code=100「上传配额已满」**；
+		Redis storage:user:count=3、bytes=1026（每张 342B）
+	c	M6-A3 删图	上传 → 建商品 → 删商品 → 磁盘原图 **False**、缩略图 **False**（都被清理）；
+		配额计数 3 → **2**（退还 1 张）
+	d	M6-A4 缩略图	GET /product/my 返回 thumbUrl=/static/uploads/product/{uid}/{uuid}_thumb.jpg；
+		盘上原图与缩略图都存在（缩略图不再是"白生成"）
+
+三、定时任务真机/集成场景（真实 MySQL + 真实 Redis）
+	e	B1 阈值接线	配置 app.task.auto-confirm.days=3 → SQL 实测 `Parameters: 3(Integer), 3(Integer), 1000(Integer)`；
+		行为级：已支付 4 天的面交单被完成、已支付 2 天的不动（若阈值没接线则两条都不会被处理）
+	f	B3 提醒去重	窗口 (6,8] 命中两张单 → 2 条通知 + 写 task:remind:sent:{id}（TTL 68200~86400 秒）；
+		**再跑一次同一任务 → 通知条数不变**（去重生效；修前会重复提醒）
+	g	B4 事务边界	单测：3 张候选单中第 2 张抛异常 → 3 张都被尝试处理、异常不外抛；
+		反射断言：cancelTimeoutOrders / autoConfirmReceive 上不得有 @Transactional
+	h	C 面交兜底	集成测试：status=1 面交单已支付超阈值 → 1→3 且 finish_time 落库，买卖双方各收到一条站内信；
+		邮寄单 status=2 超阈值仍按原规则 2→3（回归）
+
+四、前端门禁（本批改了前端：列表用缩略图 + ProductImage 一次性降级）
+命令	npx vitest run
+结果	18 个文件 / 187 个用例全绿（批次前 17 文件 / 182 用例，本批 +1 文件 / +5 用例）
+新增用例	components/__tests__/ProductImage.spec.js ①~⑤：优先用缩略图 / 缩略图 404 退回原图 /
+		原图也失败才显示占位图 / 无缩略图时直接用原图 / 空地址显示占位图
+命令	npm run build
+结果	无 error（8.67s）；ProductImage 分包 1.06 kB
+命令	npm run verify:styles / verify:chunks
+结果	11/11 关键字命中；分包检查全部通过
+
+五、本批踩到的两个坑（都不是产品缺陷，但都会造成误判）
+	坑①	`@Select` 里把 `<>` 写成了 HTML 转义 `&lt;&gt;`（其它 Mapper 用 <script> 时留下的习惯）→ SQL 语法错误。
+		单测把 Mapper mock 掉了所以全绿，**真机场景立刻暴露**（日志："删除商品图片失败（降级）"）。
+		教训：涉及自定义 SQL 的改动，必须有真机（真实 MySQL）场景兜底。
+	坑②	ShedLock 测试坑：任务方法走代理调用会真去 shedlock 表抢锁，拿锁用独立事务提交、
+		释放却跟着用例事务走 —— 用例失败回滚会撤销"释放"，lock_until 停 +10 分钟，
+		下次运行被静默跳过（表现为断言莫名其妙失败）；在事务里 UPDATE 那把锁更糟（ShedLock 独立事务等行锁 50 秒）。
+		处理：集成测试统一用 AopTestUtils.getTargetObject(scheduledTasks) 绕过代理，加锁行为另用 extractor 断言。
+	附带修正	提醒窗口由 (6,7] 放宽到 (6,8] 后，既有 RemindBeforeAutoConfirmTaskTest 的负向对照"发货 8 天不该提醒"
+		正好压在边界上（MySQL DATETIME 对小数秒四舍五入 → 抖动），已把它挪到 9 天（用例语义不变）。
+
+六、数据清理核对
+	残留商品/订单/用户=0；上传目录 product/{userId}/ 下的测试文件与 Redis 配额键均已删除
+
+
 

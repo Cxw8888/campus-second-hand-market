@@ -92,6 +92,31 @@ public final class RedisKeys {
      */
     public static final String ADMIN_STATS_PREFIX = "admin:stats:";
 
+    // ---------------- 定时任务 ----------------
+
+    /**
+     * 自动确认收货「提前提醒」去重标记（批次 6.0.5.2 · 定时任务③）。
+     *
+     * <p>提醒任务每日跑一次，但"窗口内的订单"可能在多天里反复命中（窗口放宽后更是如此）；
+     * 没有去重标记就会重复提醒买家。TTL 7 天覆盖订单的剩余生命周期。</p>
+     */
+    public static final String TASK_REMIND_SENT_PREFIX = "task:remind:sent:";
+
+    // ---------------- 存储配额 ----------------
+
+    /**
+     * 用户上传文件数（批次 6.0.5.2 · M6-A2）。
+     *
+     * <p>用 Redis 计数而不是每次扫盘/查库：上传是高频写路径，计数只需 O(1) 读写。
+     * <b>不设 TTL</b>：它代表"当前磁盘上有多少属于该用户的文件"这一事实，
+     * 允许过期会让配额凭空恢复（删除时会 −1，因此长期值是有界的）。
+     * Redis 被清空时计数归零 → 退化为"暂时放宽"，属可接受降级（见 6.0.5.2 报告）。</p>
+     */
+    public static final String STORAGE_USER_COUNT_PREFIX = "storage:user:count:";
+
+    /** 用户上传总字节数（同上）。 */
+    public static final String STORAGE_USER_BYTES_PREFIX = "storage:user:bytes:";
+
     // ---------------- Key 构建方法 ----------------
 
     /** user:token:version:{userId} */
@@ -162,6 +187,21 @@ public final class RedisKeys {
     /** order:restored:{orderId}（库存回补幂等凭证，TTL 30 天） */
     public static String orderRestored(Long orderId) {
         return ORDER_RESTORED_PREFIX + orderId;
+    }
+
+    /** task:remind:sent:{orderId}（自动确认收货提醒去重，TTL 7 天） */
+    public static String taskRemindSent(Long orderId) {
+        return TASK_REMIND_SENT_PREFIX + orderId;
+    }
+
+    /** storage:user:count:{userId}（上传文件数配额计数） */
+    public static String storageUserCount(Long userId) {
+        return STORAGE_USER_COUNT_PREFIX + userId;
+    }
+
+    /** storage:user:bytes:{userId}（上传总字节配额计数） */
+    public static String storageUserBytes(Long userId) {
+        return STORAGE_USER_BYTES_PREFIX + userId;
     }
 
     /** admin:stats:overview */

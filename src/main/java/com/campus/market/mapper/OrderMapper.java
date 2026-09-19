@@ -114,10 +114,35 @@ public interface OrderMapper extends BaseMapper<Order> {
     int unfreezeToComplete(@Param("id") Long id);
 
     /**
-     * 定时任务：发货满 7 天自动确认收货（2→3）。
+     * 定时任务：自动确认收货（单条，批次 6.0.5.2 起同时作为<b>面交单兜底完成</b>）。
+     *
+     * <p>覆盖两类订单（时间窗口由取数 SQL {@link #selectAutoConfirmCandidates} 把关，这里只做状态守卫）：</p>
+     * <ul>
+     *   <li>邮寄单：{@code status=2}（已发货待收货）+ {@code trade_type IN (2,3)}；</li>
+     *   <li>面交单：{@code status=1}（已支付）+ {@code trade_type = 1} —— 修 6.0.5.1 的遗留
+     *       "买卖双方都失联时面交单永久停在 1"（trade_type=1 不可能是 status=2，因为面交严禁发货）。</li>
+     * </ul>
+     * <p>状态守卫保证并发/重复执行安全：已经被确认（3）或被冻结/退款（5/6/7）的订单不会被它改掉。</p>
      */
-    @Update("UPDATE tb_order SET status = 3, finish_time = NOW() WHERE status = 2 AND ship_time < NOW() - INTERVAL 7 DAY AND trade_type IN (2,3) AND is_deleted = 0")
-    int autoConfirmReceive();
+    @Update("UPDATE tb_order SET status = 3, finish_time = NOW() WHERE id = #{id} AND is_deleted = 0 "
+            + "AND ((status = 2 AND trade_type IN (2,3)) OR (status = 1 AND trade_type = 1))")
+    int autoConfirmOne(@Param("id") Long id);
+
+    /**
+     * 定时任务取数：自动确认收货的候选订单（单批上限 {@code limit}，先到先处理）。
+     *
+     * <p>批次 6.0.5.2 的两处变化：</p>
+     * <ol>
+     *   <li><b>阈值参数化</b>（原来硬编码 {@code INTERVAL 7 DAY}，与 {@code app.task.auto-confirm.days} 脱节）；</li>
+     *   <li><b>覆盖面交单</b>（{@code status=1 AND trade_type=1 AND pay_time} 超期）——
+     *       面交按"支付时间"计龄，邮寄按"发货时间"。</li>
+     * </ol>
+     */
+    @Select("SELECT * FROM tb_order WHERE is_deleted = 0 AND ("
+            + "(status = 2 AND trade_type IN (2,3) AND ship_time < NOW() - INTERVAL #{days} DAY) OR "
+            + "(status = 1 AND trade_type = 1 AND pay_time IS NOT NULL AND pay_time < NOW() - INTERVAL #{days} DAY)"
+            + ") ORDER BY id ASC LIMIT #{limit}")
+    List<Order> selectAutoConfirmCandidates(@Param("days") Integer days, @Param("limit") Integer limit);
 
     /**
      * 定时任务：退款被拒 3 天申诉期满后自动恢复原状态（未发货→1，已发货→2）。
@@ -132,10 +157,19 @@ public interface OrderMapper extends BaseMapper<Order> {
     List<Order> selectTimeoutPendingOrders(@Param("minutes") Integer minutes, @Param("limit") Integer limit);
 
     /**
-     * 定时任务取数：查询处于自动确认收货提醒窗口（发货后 fromDays~toDays 天）的订单。
+     * 定时任务取数：处于自动确认收货提醒窗口内的订单。
+     *
+     * <p>窗口 = {@code ship_time <= NOW() - INTERVAL fromDays DAY AND ship_time > NOW() - INTERVAL toDays DAY}。
+     * 批次 6.0.5.2 · 定时任务③把它从"单日区间"放宽为可配置宽度（默认 2 天），
+     * 这样应用停机一天不会永久漏提醒；窗口宽度又不足以覆盖那些"早就该被自动确认"的陈旧订单
+     * （它们已不在 status=2）。另加 {@code limit} 防止一次拉全表。</p>
      */
-    @Select("SELECT * FROM tb_order WHERE status = 2 AND trade_type IN (2,3) AND is_deleted = 0 AND ship_time <= NOW() - INTERVAL #{fromDays} DAY AND ship_time > NOW() - INTERVAL #{toDays} DAY")
-    List<Order> selectAutoConfirmRemindOrders(@Param("fromDays") Integer fromDays, @Param("toDays") Integer toDays);
+    @Select("SELECT * FROM tb_order WHERE status = 2 AND trade_type IN (2,3) AND is_deleted = 0 "
+            + "AND ship_time <= NOW() - INTERVAL #{fromDays} DAY AND ship_time > NOW() - INTERVAL #{toDays} DAY "
+            + "ORDER BY ship_time ASC LIMIT #{limit}")
+    List<Order> selectAutoConfirmRemindOrders(@Param("fromDays") Integer fromDays,
+                                              @Param("toDays") Integer toDays,
+                                              @Param("limit") Integer limit);
 
     /**
      * 订单回看已删除商品占位示例：用自定义 SQL 绕过逻辑删除过滤取订单本身；

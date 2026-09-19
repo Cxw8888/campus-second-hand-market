@@ -37,7 +37,17 @@ function openDetail() {
 <template>
   <article class="product-card" :class="{ 'is-sold-out': soldOut }" @click="openDetail">
     <div class="product-card__cover">
-      <ProductImage :src="product.coverImage" :alt="product.title" ratio="4 / 3" />
+      <!--
+        列表页优先用 400px 缩略图（6.0.5.2 · M6-A4）：原图最大可达 8192px，列表页白耗流量。
+        thumbUrl 为 null（演示数据 / 非本地上传图）或缩略图 404 时，
+        ProductImage 会自动降级到 coverImage，不会退化成「暂无图片」。
+      -->
+      <ProductImage
+        :src="product.thumbUrl || product.coverImage"
+        :fallback-src="product.coverImage"
+        :alt="product.title"
+        ratio="4 / 3"
+      />
       <span v-if="soldOut" class="product-card__sold-out">已售罄</span>
       <!-- 交易方式三色标签：面交绿 / 邮寄蓝 / 皆可橙 -->
       <TradeTypeTag class="product-card__trade" :type="product.tradeType" size="sm" />

@@ -43,6 +43,16 @@ public class ProductListVO implements Serializable {
     @Schema(description = "封面图（imageUrls 第一张）")
     private String coverImage;
 
+    /**
+     * 列表用缩略图 URL（批次 6.0.5.2 · M6-A4）。
+     *
+     * <p>上传时生成 400px 缩略图（{@code xxx_thumb.jpg}），列表页用它、详情页用原图，
+     * 避免列表页加载最大 8192px 的原图。为 null 时（非本地上传图 / 演示数据）
+     * 前端回落到 {@link #coverImage}。</p>
+     */
+    @Schema(description = "列表用缩略图 URL（400px）；为 null 时前端回落到 coverImage")
+    private String thumbUrl;
+
     @Schema(description = "分类ID")
     private Long categoryId;
 

@@ -179,6 +179,16 @@ public interface ProductMapper extends BaseMapper<Product> {
     int offShelfByUser(@Param("userId") Long userId);
 
     /**
+     * 统计"除指定商品外，还有多少未删除商品引用了这张图"（批次 6.0.5.2 · M6-A3 的删除护栏）。
+     *
+     * <p>上传后同一张图理论上只属于一个商品，但演示数据与验收脚本里存在复用同一 URL 的情况；
+     * 删除商品时若不检查引用就删文件，会把别的商品变成"无图"。返回 0 才允许删。</p>
+     */
+    @Select("SELECT COUNT(*) FROM tb_product WHERE is_deleted = 0 AND id <> #{excludeId} "
+            + "AND image_urls LIKE CONCAT('%', #{imageUrl}, '%')")
+    long countOtherProductsUsingImage(@Param("excludeId") Long excludeId, @Param("imageUrl") String imageUrl);
+
+    /**
      * 绕过逻辑删除过滤的精确查询（订单回看已删除商品专用，自定义 SQL 为主方案）。
      */
     @Select("SELECT * FROM tb_product WHERE id = #{id}")

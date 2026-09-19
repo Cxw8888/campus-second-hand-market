@@ -3,6 +3,7 @@ package com.campus.market.service.impl;
 import com.campus.market.common.enums.ErrorCode;
 import com.campus.market.common.exception.BusinessException;
 import com.campus.market.config.properties.StorageProperties;
+import com.campus.market.service.StorageQuotaService;
 import com.campus.market.service.StorageService;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
@@ -12,6 +13,8 @@ import org.springframework.util.StringUtils;
 import org.springframework.web.multipart.MultipartFile;
 
 import javax.imageio.ImageIO;
+import javax.imageio.ImageReader;
+import javax.imageio.stream.ImageInputStream;
 import java.awt.Color;
 import java.awt.Graphics2D;
 import java.awt.RenderingHints;
@@ -22,6 +25,7 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.nio.file.StandardCopyOption;
+import java.util.Iterator;
 import java.util.Locale;
 import java.util.Set;
 import java.util.UUID;
@@ -76,6 +80,9 @@ public class LocalStorageImpl implements StorageService {
 
     private final StorageProperties storageProperties;
 
+    /** 上传配额（批次 6.0.5.2 · M6-A2）：按用户限制文件数与总容量。 */
+    private final StorageQuotaService storageQuotaService;
+
     @Override
     public String upload(MultipartFile file, Long userId) {
         // ① 登录校验：未登录 / 非法 userId 直接拒绝
@@ -95,11 +102,16 @@ public class LocalStorageImpl implements StorageService {
         // ③ 文件魔数校验（只信任文件内容）
         String format = detectImageFormat(file);
 
-        // ④ 尺寸与像素校验
-        BufferedImage source = readImage(file);
-        checkDimension(source);
+        // ④ 尺寸与像素校验（批次 6.0.5.2 · M6-A1：先读图片头，见 checkDimensionFromHeader）
+        checkDimensionFromHeader(file);
 
-        // ⑤ UUID 重命名 + 分目录落盘
+        // ⑤ 上传配额校验（批次 6.0.5.2 · M6-A2：文件数 + 总容量，超限 → code=100「上传配额已满」）
+        storageQuotaService.assertWithinQuota(userId, file.getSize());
+
+        // ⑥ 尺寸校验通过后才全量解码（缩略图需要像素数据；此时已确认不会解压出巨型位图）
+        BufferedImage source = readImage(file);
+
+        // ⑦ UUID 重命名 + 分目录落盘
         String uuid = UUID.randomUUID().toString().replace("-", "");
         String relativePath = PRODUCT_DIR + "/" + userId + "/" + uuid + ".jpg";
         Path basePath = basePath();
@@ -118,8 +130,11 @@ public class LocalStorageImpl implements StorageService {
             throw new BusinessException(ErrorCode.SYSTEM_ERROR, "文件上传失败，请稍后重试");
         }
 
-        // ⑥ 生成 400x400 压缩缩略图（失败不阻断主流程）
+        // ⑧ 生成 400x400 压缩缩略图（失败不阻断主流程）
         writeThumbnail(source, basePath, PRODUCT_DIR + "/" + userId + "/" + uuid + "_thumb.jpg");
+
+        // ⑨ 落盘成功后再记配额（先校验后记账；记账失败仅告警，不因 Redis 故障把已落盘的文件判为失败）
+        storageQuotaService.recordUpload(userId, file.getSize());
 
         log.info("图片上传成功: userId={}, format={}, size={}B, path={}", userId, format, file.getSize(), relativePath);
         return buildUrl(relativePath);
@@ -130,7 +145,15 @@ public class LocalStorageImpl implements StorageService {
         if (!StringUtils.hasText(url)) {
             return;
         }
-        String relativePath = stripUrlPrefix(url);
+        // 【批次 6.0.5.2 · M6-A3】只处理"本存储前缀下"的 URL：
+        // 头像/商品图可能是外链（http(s)://…）或第三方前缀，删不到也不该去猜路径。
+        String prefix = normalizedUrlPrefix();
+        String trimmed = url.trim().replace('\\', '/');
+        if (!StringUtils.hasText(prefix) || !trimmed.startsWith(prefix + "/")) {
+            log.debug("跳过非本存储前缀的文件删除: url={}", url);
+            return;
+        }
+        String relativePath = stripUrlPrefix(trimmed);
         if (!StringUtils.hasText(relativePath)) {
             return;
         }
@@ -143,8 +166,16 @@ public class LocalStorageImpl implements StorageService {
             log.warn("拒绝删除存储目录之外的文件: url={}", url);
             return;
         }
+        // 删除前先取文件大小与归属用户（配额计数需要），文件不存在时为 0/-1
+        long fileSize = sizeOf(target);
+        boolean existed = Files.exists(target);
         deleteQuietly(target);
         deleteQuietly(thumbnailPathOf(target));
+        // 退还配额：只有"确实删掉了主图"才减计数（重复删除/文件已丢失不会把额度越删越多）
+        Long ownerId = userIdOf(relativePath);
+        if (existed && ownerId != null) {
+            storageQuotaService.recordDelete(ownerId, fileSize);
+        }
     }
 
     @Override
@@ -232,11 +263,59 @@ public class LocalStorageImpl implements StorageService {
     }
 
     /**
+     * 尺寸与像素校验（批次 6.0.5.2 · M6-A1）：<b>只读图片头部元数据，不做全量解码</b>。
+     *
+     * <h3>修的是什么</h3>
+     * <p>修前是 {@code ImageIO.read(file)} 先把整张图解成 {@code BufferedImage}，
+     * 之后才调 {@code checkDimension(image)}。而"解压炸弹"（5MB 的纯色巨图，
+     * 例如 20000×20000 PNG）在解码阶段就要申请上 GB 的像素缓冲区 →
+     * {@code OutOfMemoryError}。{@code OutOfMemoryError} 是 {@link Error}，
+     * {@code GlobalExceptionHandler} 的 {@code Exception} 兜底<b>接不住</b>，
+     * 结果是整个 JVM 线程/进程被拖垮（自审报告 M6 ①）。</p>
+     *
+     * <p>现在改为先用 {@link ImageReader} 只读头部拿宽高（JPEG 的 SOF、PNG 的 IHDR 等），
+     * 尺寸合规则拒绝在解码之前发生，内存占用与图片尺寸无关。</p>
+     *
+     * <p><b>实测附带结论</b>：JDK 自带的 ImageIO <b>没有 WebP 解码器</b>
+     * （只支持 JPEG/PNG/GIF/BMP/WBMP/TIFF），因此 {@code getImageReaders} 对 .webp 返回空 ——
+     * 白名单里的 webp 事实上一直传不进来（修前是 {@code ImageIO.read} 返回 null →
+     * "无法解析"；现在是"不支持的图片格式"，<b>行为一致、只是文案更准确</b>）。
+     * 本批不引入第三方解码依赖。</p>
+     */
+    private void checkDimensionFromHeader(MultipartFile file) {
+        try (InputStream in = file.getInputStream();
+             ImageInputStream imageStream = ImageIO.createImageInputStream(in)) {
+            if (imageStream == null) {
+                throw new BusinessException(ErrorCode.PARAM_ERROR, "图片文件内容不合法，无法解析");
+            }
+            Iterator<ImageReader> readers = ImageIO.getImageReaders(imageStream);
+            if (!readers.hasNext()) {
+                throw new BusinessException(ErrorCode.PARAM_ERROR, "不支持的图片格式");
+            }
+            ImageReader reader = readers.next();
+            try {
+                reader.setInput(imageStream, true, true);
+                int width = reader.getWidth(0);
+                int height = reader.getHeight(0);
+                checkDimension(width, height);
+            } finally {
+                reader.dispose();
+            }
+        } catch (BusinessException e) {
+            throw e;
+        } catch (IOException e) {
+            log.warn("读取图片头部失败: {}", e.getMessage());
+            throw new BusinessException(ErrorCode.PARAM_ERROR, "图片文件内容不合法，无法解析");
+        }
+    }
+
+    /**
      * 像素校验：最大边长 ≤ 8192px，总像素 ≤ 5000 万。
      */
-    private void checkDimension(BufferedImage image) {
-        int width = image.getWidth();
-        int height = image.getHeight();
+    private void checkDimension(int width, int height) {
+        if (width <= 0 || height <= 0) {
+            throw new BusinessException(ErrorCode.PARAM_ERROR, "图片文件内容不合法，无法解析");
+        }
         if (width > MAX_EDGE_PX || height > MAX_EDGE_PX) {
             throw new BusinessException(ErrorCode.PARAM_ERROR, "图片最大边长不能超过8192px");
         }
@@ -348,6 +427,32 @@ public class LocalStorageImpl implements StorageService {
             Files.deleteIfExists(path);
         } catch (IOException e) {
             log.warn("删除文件失败: path={}, err={}", path, e.getMessage());
+        }
+    }
+
+    /** 文件字节数；不存在或读取失败返回 0（配额退还用，不影响删除本身）。 */
+    private long sizeOf(Path path) {
+        try {
+            return Files.exists(path) ? Files.size(path) : 0L;
+        } catch (IOException e) {
+            log.warn("读取文件大小失败: path={}, err={}", path, e.getMessage());
+            return 0L;
+        }
+    }
+
+    /**
+     * 从相对路径 {@code product/{userId}/{uuid}.jpg} 解析归属用户（配额退还用）。
+     * 路径不符合约定时返回 null（例如历史手工放入的文件）。
+     */
+    private Long userIdOf(String relativePath) {
+        String[] parts = relativePath.split("/");
+        if (parts.length < 3 || !PRODUCT_DIR.equals(parts[0])) {
+            return null;
+        }
+        try {
+            return Long.parseLong(parts[1]);
+        } catch (NumberFormatException e) {
+            return null;
         }
     }
 

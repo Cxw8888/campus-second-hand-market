@@ -12,9 +12,13 @@ import static org.assertj.core.api.Assertions.assertThat;
 /**
  * 定时任务：发货满 7 天自动确认收货（2→3）。
  *
- * <p>对应 SQL：{@code OrderMapper.autoConfirmReceive()}
- * —— {@code SET status=3, finish_time=NOW() WHERE status=2 AND ship_time < NOW() - INTERVAL 7 DAY
- * AND trade_type IN (2,3) AND is_deleted=0}。</p>
+ * <p>对应 SQL：{@code OrderMapper.selectAutoConfirmCandidates(days, limit)} 取候选 +
+ * {@code OrderMapper.autoConfirmOne(id)} 逐单确认
+ * —— 邮寄分支：{@code status=2 AND trade_type IN (2,3) AND ship_time < NOW() - INTERVAL days DAY}
+ * （days 来自 {@code app.task.auto-confirm.days}，本类走默认 7 天）。</p>
+ *
+ * <p>批次 6.0.5.2 起，面交分支（{@code status=1 AND trade_type=1 AND pay_time} 超期）由
+ * {@code AutoConfirmCoverageTaskTest} 覆盖。</p>
  */
 class AutoConfirmReceiveTaskTest extends AbstractScheduledTaskTest {
 

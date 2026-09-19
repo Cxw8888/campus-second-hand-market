@@ -13,6 +13,7 @@ import com.campus.market.mapper.ProductMapper;
 import com.campus.market.mapper.UserMapper;
 import com.campus.market.security.LoginUser;
 import com.campus.market.security.UserContext;
+import com.campus.market.service.StorageService;
 import com.campus.market.service.impl.ProductServiceImpl;
 import com.campus.market.service.support.SearchCircuitBreaker;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -86,6 +87,10 @@ class ProductSoldOutEditReviewTest {
     @Mock
     private SearchCircuitBreaker searchCircuitBreaker;
 
+    /** 图片文件清理（6.0.5.2 · M6-A3 起 ProductServiceImpl 依赖它）。 */
+    @Mock
+    private StorageService storageService;
+
     private ProductServiceImpl productService;
 
     /** 补齐 TableInfo：{@code update()} 里的 {@code lambdaUpdate().set(...)} 会立即翻译列名。 */
@@ -99,7 +104,7 @@ class ProductSoldOutEditReviewTest {
     void setUp() {
         productService = new ProductServiceImpl(productMapper, categoryMapper, orderMapper, userMapper,
                 stringRedisTemplate, new ObjectMapper().registerModule(new JavaTimeModule()),
-                searchProperties, searchCircuitBreaker);
+                searchProperties, searchCircuitBreaker, storageService);
 
         Product soldOut = new Product();
         soldOut.setId(PRODUCT_ID);

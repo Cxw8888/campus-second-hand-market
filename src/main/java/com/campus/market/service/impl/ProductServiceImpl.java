@@ -22,6 +22,7 @@ import com.campus.market.mapper.ProductMapper;
 import com.campus.market.mapper.UserMapper;
 import com.campus.market.security.UserContext;
 import com.campus.market.service.ProductService;
+import com.campus.market.service.StorageService;
 import com.campus.market.service.support.SearchCircuitBreaker;
 import com.campus.market.vo.ProductDetailVO;
 import com.campus.market.vo.ProductListVO;
@@ -42,6 +43,7 @@ import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.util.Collections;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
@@ -170,6 +172,8 @@ public class ProductServiceImpl implements ProductService {
     private final ObjectMapper objectMapper;
     private final SearchProperties searchProperties;
     private final SearchCircuitBreaker searchCircuitBreaker;
+    /** 图片文件清理（批次 6.0.5.2 · M6-A3）：删商品 / 换图时删除磁盘原图。 */
+    private final StorageService storageService;
 
     /** 容器关闭时收掉搜索线程池（daemon 线程虽不阻塞退出，显式关闭更干净）。 */
     @PreDestroy
@@ -295,6 +299,10 @@ public class ProductServiceImpl implements ProductService {
         evictDetailCache(id);
         log.info("商品编辑成功: id={}, status={}→{}, 关键字段变更={}",
                 id, product.getStatus(), newStatus, criticalChanged);
+
+        // 批次 6.0.5.2 · M6-A3：删除被替换掉的旧图（未变的不动）。
+        // ⚠️ 必须在 DB 更新之后（先更 DB 再动文件；即便文件删除失败，DB 已是新状态，不会出现"库里有、盘上无"）
+        deleteReplacedImages(id, product.getImageUrls(), imageUrls);
     }
 
     @Override
@@ -312,6 +320,9 @@ public class ProductServiceImpl implements ProductService {
         productMapper.deleteById(id);
         // 先更新 DB，再删除缓存
         evictDetailCache(id);
+        // 批次 6.0.5.2 · M6-A3：逻辑删除不该把图片留在盘上（修前 StorageService.delete 从无调用方，
+        // 磁盘只增不减）。删除失败只告警，不阻塞业务。
+        deleteImagesQuietly(id, product.getImageUrls());
         log.info("商品已逻辑删除: id={}, userId={}", id, product.getUserId());
     }
 
@@ -675,6 +686,8 @@ public class ProductServiceImpl implements ProductService {
         vo.setTradeType(product.getTradeType());
         vo.setTradeLocation(product.getTradeLocation());
         vo.setCoverImage(coverImage(product.getImageUrls()));
+        // 批次 6.0.5.2 · M6-A4：列表页用 400px 缩略图（原图最大可达 8192px，列表页白耗流量）
+        vo.setThumbUrl(thumbnailUrl(coverImage(product.getImageUrls())));
         vo.setCategoryId(product.getCategoryId());
         vo.setCategoryName(categoryName);
         vo.setStatus(product.getStatus());
@@ -687,6 +700,60 @@ public class ProductServiceImpl implements ProductService {
             vo.setSellerId(product.getUserId());
         }
         return vo;
+    }
+
+    /**
+     * 删除被换掉的旧图（批次 6.0.5.2 · M6-A3）。
+     *
+     * @param productId 当前商品（用于排除自身做"是否被其它商品引用"的判断）
+     * @param oldUrls   更新前的图集（DB 里的旧值）
+     * @param newUrls   更新后的图集（本次提交的新值）
+     */
+    private void deleteReplacedImages(Long productId, List<String> oldUrls, List<String> newUrls) {
+        if (oldUrls == null || oldUrls.isEmpty()) {
+            return;
+        }
+        List<String> removed = oldUrls.stream()
+                .filter(url -> url != null && (newUrls == null || !newUrls.contains(url)))
+                .toList();
+        if (removed.isEmpty()) {
+            return;
+        }
+        log.info("商品换图, 清理被替换的旧图: productId={}, 删除数={}", productId, removed.size());
+        deleteImagesQuietly(productId, removed);
+    }
+
+    /**
+     * 逐个清理图片文件（批次 6.0.5.2 · M6-A3）。
+     *
+     * <p><b>三条安全护栏</b>（删错文件比不删更糟）：</p>
+     * <ol>
+     *   <li>只处理本地上传前缀下的 URL（{@code StorageService.delete} 内部也会再挡一次）；</li>
+     *   <li><b>被其它未删除商品引用的图不删</b> —— 同一张图可能在多个商品里被复用
+     *       （演示数据与 .http 脚本里就有复用的 URL），删掉会让别人的商品变成"无图"；</li>
+     *   <li>任何异常只 {@code log.warn}，绝不阻塞业务（图片是附属资源，业务数据才是主线）。</li>
+     * </ol>
+     */
+    private void deleteImagesQuietly(Long productId, List<String> urls) {
+        if (urls == null || urls.isEmpty()) {
+            return;
+        }
+        for (String url : urls) {
+            if (url == null || url.isBlank()) {
+                continue;
+            }
+            try {
+                long references = productMapper.countOtherProductsUsingImage(productId, url);
+                if (references > 0) {
+                    log.info("图片仍被其它商品引用, 跳过删除: url={}, 引用数={}", url, references);
+                    continue;
+                }
+                storageService.delete(url);
+            } catch (Exception e) {
+                log.warn("删除商品图片失败（降级，不阻塞业务）: productId={}, url={}, err={}",
+                        productId, url, e.getMessage());
+            }
+        }
     }
 
     private ProductDetailVO toDetailVO(Product product) {
@@ -703,6 +770,29 @@ public class ProductServiceImpl implements ProductService {
 
     private String coverImage(List<String> imageUrls) {
         return imageUrls == null || imageUrls.isEmpty() ? null : imageUrls.get(0);
+    }
+
+    /**
+     * 由原图 URL 推导缩略图 URL（批次 6.0.5.2 · M6-A4）。
+     *
+     * <p>规则与 {@code LocalStorageImpl} 落盘时一致：在扩展名前插入 {@code _thumb}
+     * （{@code xxx.jpg → xxx_thumb.jpg}）。</p>
+     *
+     * <p><b>为什么只对 .jpg 生效</b>：本项目的上传实现<b>一律以 .jpg 落盘</b>
+     * （不管原文件是 png 还是 jpg），因此"一定存在缩略图"的 URL 只可能是 .jpg。
+     * 而 seed/演示数据里的 {@code demo-*.png}、外链图片都没有缩略图 ——
+     * 对它们返回 null，前端会回落到原图（{@code coverImage}），不会出现"有图却显示占位图"。</p>
+     */
+    private String thumbnailUrl(String coverImageUrl) {
+        if (coverImageUrl == null || !coverImageUrl.toLowerCase(Locale.ROOT).endsWith(".jpg")) {
+            return null;
+        }
+        int slash = coverImageUrl.lastIndexOf('/');
+        int dot = coverImageUrl.lastIndexOf('.');
+        if (dot < 0 || dot < slash) {
+            return null;
+        }
+        return coverImageUrl.substring(0, dot) + "_thumb" + coverImageUrl.substring(dot);
     }
 
     // ================================================================ 可见性 / 状态机

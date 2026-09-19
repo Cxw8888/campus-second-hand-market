@@ -14,6 +14,7 @@ import com.campus.market.mapper.OrderMapper;
 import com.campus.market.mapper.ProductMapper;
 import com.campus.market.mapper.UserMapper;
 import com.campus.market.service.impl.ProductServiceImpl;
+import com.campus.market.service.StorageService;
 import com.campus.market.service.support.SearchCircuitBreaker;
 import com.campus.market.vo.ProductListVO;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -96,6 +97,10 @@ class ProductSearchTest {
     @Mock
     private StringRedisTemplate stringRedisTemplate;
 
+    /** 图片文件清理（6.0.5.2 · M6-A3 起 ProductServiceImpl 依赖它）。 */
+    @Mock
+    private StorageService storageService;
+
     /** 假 Redis 存储 */
     private final Map<String, String> redisStore = new HashMap<>();
 
@@ -157,7 +162,7 @@ class ProductSearchTest {
         // 构造参数顺序 = ProductServiceImpl 里 final 字段的声明顺序
         productService = new ProductServiceImpl(productMapper, categoryMapper, orderMapper,
                 userMapper, stringRedisTemplate, new ObjectMapper().registerModule(new JavaTimeModule()),
-                searchProperties, breaker);
+                searchProperties, breaker, storageService);
     }
 
     // ================================================================ FULLTEXT 与降级

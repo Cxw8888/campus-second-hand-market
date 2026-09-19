@@ -17,9 +17,9 @@ import static org.assertj.core.api.Assertions.assertThat;
 /**
  * 定时任务：自动确认收货前 24 小时提醒买家（每日 10:00）。
  *
- * <p>对应取数 SQL：{@code OrderMapper.selectAutoConfirmRemindOrders(confirmDays-1, confirmDays)}
- * —— {@code status=2 AND trade_type IN (2,3) AND ship_time <= NOW() - INTERVAL 6 DAY
- * AND ship_time > NOW() - INTERVAL 7 DAY}，即发货后第 6~7 天这个窗口。</p>
+ * <p>对应取数 SQL：{@code OrderMapper.selectAutoConfirmRemindOrders(fromDays, toDays, limit)}
+ * —— {@code status=2 AND trade_type IN (2,3) AND ship_time &lt;= NOW() - INTERVAL 6 DAY
+ * AND ship_time &gt; NOW() - INTERVAL 8 DAY}（批次 6.0.5.2 起窗口宽度可配，默认第 6~8 天）。</p>
  *
  * <p>站内信见 {@link SyncNotificationTestConfig}：异步边界被替换成同步落库，
  * 因此这里断言的是 tb_notification 里真实的一行，且随测试事务回滚。</p>
@@ -40,8 +40,12 @@ class RemindBeforeAutoConfirmTaskTest extends AbstractScheduledTaskTest {
         // 负向对照①：发货才 2 天，远没到提醒窗口
         insertOrder(OrderStatus.SHIPPED, TRADE_TYPE_MAIL, now.minusDays(2), null);
 
-        // 负向对照②：发货 8 天，已经越过提醒窗口（该由自动确认收货处理，不该再提醒）
-        insertOrder(OrderStatus.SHIPPED, TRADE_TYPE_MAIL, now.minusDays(8), null);
+        // 负向对照②：发货 9 天，已经越过提醒窗口（该由自动确认收货处理，不该再提醒）
+        // 注意（6.0.5.2 · 定时任务③）：窗口已从"单日区间（第 6~7 天）"放宽为可配置宽度
+        // （默认 2 天 → 第 6~8 天），用来兜住"应用停机一天"的漏提醒。
+        // 因此这条负向对照必须挪到 9 天：正好 8 天会落在 (NOW()-8d, NOW()-6d] 的边界附近，
+        // 而 MySQL 的 DATETIME 会对小数秒四舍五入，边界值会出现"有时命中有时不命中"的抖动。
+        insertOrder(OrderStatus.SHIPPED, TRADE_TYPE_MAIL, now.minusDays(9), null);
 
         // 负向对照③：面交单不参与提醒（守住 trade_type IN (2,3)）
         insertOrder(OrderStatus.SHIPPED, TRADE_TYPE_FACE, now.minusDays(6).minusHours(12), null);

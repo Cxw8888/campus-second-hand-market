@@ -1,4 +1,5 @@
-校园二手交易平台 - 项目需求与设计文档 (AI Context 正式封版 V31)
+校园二手交易平台 - 项目需求与设计文档 (AI Context 正式封版 V32)
+V32 核心变更：新增 3.9.7「上传配额与文件清理约定」（先读图片头再解码、按用户双阈值配额、删商品/换图/换头像清理文件）、3.9.8「定时任务约定」（阈值接线、lock-at-most-for 接线、提醒去重+窗口、逐单独立事务）；订单状态机补「已支付面交单超期自动完成」兜底路径。技术设计不变，仅追加实现约定与踩坑记录。
 V31 核心变更：补「卖家确认面交完成（已支付面交单 1→3）」路径（订单状态机 + 接口清单 + 前端按钮），补「售罄商品编辑」审核规则（关键字段变更必须重审）；3.9.6 记录 PowerShell 请求体编码踩坑（验证脚本专用）。技术设计不变，仅追加实现约定与踩坑记录。
 V30 核心变更：新增 3.9.4「事务边界与异步通知约定」（`TransactionHelper.runAfterCommit` 范式、`NotificationDispatcher` 独立 Bean 的原因、CallerRunsPolicy 的 sleep 为何不再持有行锁）、3.9.5「用户封禁缓存约定」（写完移到提交后、TTL 1 天、拦截器"缓存说封禁时以库为准"）。技术设计不变，仅追加实现约定与踩坑记录。
 V29 核心变更：新增 3.9.1「库存回补幂等约定」（封禁不回补、只在 5→4 回补、`order:restored:{orderId}` 凭证与回滚释放）、3.9.2「封禁商品状态约定」（下架 `status IN (1,2)`、回补不改状态、下单校验卖家 status、重新上架走 `relistIfSoldOut`）、3.9.3「安全响应头约定」（CSP/HSTS 的下发边界）。技术设计不变，仅追加实现约定与踩坑记录。
@@ -193,6 +194,7 @@ stateDiagram-v2
     已支付待发货 --> 已发货待收货 : 卖家发货(邮寄) (1→2)
     已支付待发货 --> 已完成 : 买家确认(面交) (1→3)
     已支付待发货 --> 已完成 : 卖家确认面交完成 (1→3, V31 新增)
+    已支付待发货 --> 已完成 : 超期系统自动完成(面交兜底) (1→3, V32 新增)
     已支付待发货 --> 退款申请中 : 买家申请退款 (1→6)
     
     已发货待收货 --> 已完成 : 买家确认/7天自动 (2→3)
@@ -943,6 +945,50 @@ Invoke-RestMethod -Uri $url -Method $method -Headers $headers `
 - 断言"某个按钮是否存在"时用**按钮文本集合**判断，不要对整页文本做包含判断
   （页面里其它区域可能有同名文案，例如订单进度时间线的「卖家 / 确认面交完成」）。
 
+### 3.9.7 上传配额与文件清理约定（6.0.5.2 · M6）
+
+**校验链（顺序不可调换）**：登录 → 单文件 ≤5MB → 声明类型白名单 → **文件魔数** →
+**先读图片头拿宽高并校验（边长 ≤8192px、总像素 ≤5000 万）** → **上传配额** → 全量解码（缩略图用）→ 落盘 → 记账 → 生成缩略图。
+
+- **为什么必须先读头部**（M6-A1）：修前是"先 `ImageIO.read` 全量解码、再校验尺寸"，
+  5MB 的纯色巨图（IHDR 声明 20000×20000）在解码阶段就要几 GB 像素缓冲 →
+  `OutOfMemoryError` 是 `Error`，全局异常处理器的兜底接不住，直接拖垮进程。
+  现在用 `ImageIO.getImageReaders` + `ImageReader.getWidth/getHeight` 只读头部，**尺寸不合规根本不会进入解码**。
+- **实测附带结论**：JDK 自带 ImageIO **没有 WebP 解码器**（只有 JPEG/PNG/GIF/BMP/WBMP/TIFF），
+  因此白名单里的 `webp` 事实上一直传不进来（修前报"无法解析"，现在报"不支持的图片格式"，行为一致、文案更准）。
+- **配额（M6-A2）**：`app.storage.max-files-per-user`（默认 100 张）+ `app.storage.max-total-size-mb-per-user`（默认 50MB），
+  **任一超限即拒绝**（code=100「上传配额已满」）。计数在 Redis：
+  `storage:user:count:{userId}` / `storage:user:bytes:{userId}`（上传 +1/+bytes，删除 −1/−bytes，**不设 TTL**）。
+  Redis 不可用时**降级放行**（配额是防滥用，不是安全边界）；Redis 被清空 → 计数归零（暂时放宽，见报告）。
+- **文件清理（M6-A3）**：`StorageService.delete(url)` 必须在三个地方调用 ——
+  删商品、编辑商品换图（只删被替换的）、换头像（删旧的）。
+  三条护栏：① 只处理本存储前缀下的 URL；② **被其它未删除商品引用的图不删**（`ProductMapper.countOtherProductsUsingImage`）；
+  ③ 任何删除异常只 `log.warn`，绝不阻塞业务（先更 DB 再动文件）。
+- **缩略图（M6-A4）**：上传时仍生成 `{uuid}_thumb.jpg`（400px），**列表 VO 新增 `thumbUrl`**，
+  前端 `ProductCard` 优先用缩略图、详情页用原图。`thumbUrl` 只对 `.jpg` 生效
+  （上传一律以 .jpg 落盘；演示数据是 .png、没有缩略图 → 返回 null）；
+  前端 `ProductImage` 支持 `fallbackSrc`：缩略图 404 时退回原图，原图也失败才显示占位图。
+
+### 3.9.8 定时任务约定（6.0.5.2 · 定时任务 4 条）
+
+| 约定 | 说明 |
+| :--- | :--- |
+| **阈值必须接线** | 自动确认收货的天数来自 `app.task.auto-confirm.days`，SQL 用 `#{days}` 参数化。**严禁在 SQL 里写死 INTERVAL 7 DAY**（修前配置项与实现脱节，改配置没有任何效果） |
+| **lock-at-most-for 必须接线** | 四个任务的 `@SchedulerLock.lockAtMostFor` 一律写 `${app.task.*.lock-at-most-for:默认值}`；ShedLock 用 Spring 的占位符解析器求值（`ScheduledLockConfigurationWiringTest` 用 ShedLock 自己的 extractor 断言解析结果） |
+| **提醒去重 + 窗口 + LIMIT** | `task:remind:sent:{orderId}`（SETNX，TTL 7 天）防重复提醒；窗口宽度可配（`remind-window-days`，默认 2 天 → 第 6~8 天），覆盖"应用停机一天"；`remind-batch-limit` 默认 500 |
+| **逐单独立事务** | 批处理方法**不得**带 `@Transactional`；单条处理统一走 `OrderTaskProcessor`（`REQUIRED`，无外层事务时=每单一个新事务），单条失败只影响该单并记 error，下轮重扫 |
+
+⚠️ `OrderTaskProcessor` 用 `REQUIRED` 而非 `REQUIRES_NEW` 的原因：生产路径上批方法没有事务，两者等价；
+而在 `@SpringBootTest + @Transactional` 用例里 `REQUIRED` 会加入测试事务，保证"跑完整体回滚、不留测试数据"的既有约定
+（`REQUIRES_NEW` 会独立提交，测试数据再也回滚不掉）。
+
+⚠️ **ShedLock 的测试坑**（本批实测）：任务方法走 AOP 代理调用时真的会去 `shedlock` 表抢锁，
+拿锁用独立事务提交、**释放却跟着用例事务走** —— 用例失败回滚会把"释放"一起撤销，
+`lock_until` 停留 +lockAtMostFor（10 分钟），**下一次运行被静默跳过**（表现为断言莫名其妙失败）。
+在事务里 UPDATE 那把锁更糟（ShedLock 的独立事务会等行锁 50 秒）。
+→ 集成测试统一用 `AopTestUtils.getTargetObject(scheduledTasks)` 绕过代理直接调任务体；
+加锁行为由 `ScheduledLockConfigurationWiringTest` 单独验证。
+
 4. AI 扩展预留 (RAG 智能导购)
 MVP 阶段：关键词检索用 MySQL LIKE，必须匹配 title 或 description。必须参数化 CONCAT('%', #{keyword}, '%')，严禁拼接。
 
@@ -1166,7 +1212,12 @@ CAS 扣减：UPDATE tb_product SET stock = stock - #{quantity}, status = CASE WH
 
 面交直接完成 SQL（权限校验 seller_id）：SET status=3, finish_time=NOW() WHERE status=0 AND trade_type=1 AND seller_id=? AND is_deleted=0。必须用 seller_id，严禁使用 user_id。
 
-自动确认收货定时任务：SET status=3, finish_time=NOW() WHERE status=2 AND ship_time < NOW()-INTERVAL 7 DAY AND trade_type IN (2,3) AND is_deleted=0。
+自动确认收货（定时任务，V32 起同时覆盖面交兜底）：
+  邮寄：SET status=3, finish_time=NOW() WHERE status=2 AND trade_type IN (2,3) AND ship_time < NOW()-INTERVAL #{days} DAY AND is_deleted=0
+  面交：SET status=3, finish_time=NOW() WHERE status=1 AND trade_type=1 AND pay_time < NOW()-INTERVAL #{days} DAY AND is_deleted=0
+  说明：days 来自 app.task.auto-confirm.days（默认 7，V32 前 SQL 里写死 7 天）；
+        面交分支是 V31 的兜底 —— 买卖双方都失联时，已支付面交单不会永久停在 1；
+        执行方式为「取候选（带 LIMIT）→ 逐单 UPDATE（带状态守卫）→ 通知买卖双方」，逐单独立事务（见 3.9.8）。
 
 自动确认收货前提醒定时任务：status=2 且 ship_time 在 6-7 天之间，向买家发送站内信。
 

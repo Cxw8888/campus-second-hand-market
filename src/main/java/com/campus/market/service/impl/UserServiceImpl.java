@@ -10,6 +10,7 @@ import com.campus.market.entity.User;
 import com.campus.market.mapper.UserMapper;
 import com.campus.market.security.UserContext;
 import com.campus.market.service.EmailCodeService;
+import com.campus.market.service.StorageService;
 import com.campus.market.service.TokenVersionService;
 import com.campus.market.service.UserService;
 import com.campus.market.util.PasswordValidator;
@@ -37,6 +38,8 @@ public class UserServiceImpl implements UserService {
     private final PasswordEncoder passwordEncoder;
     private final TokenVersionService tokenVersionService;
     private final EmailCodeService emailCodeService;
+    /** 头像文件清理（批次 6.0.5.2 · M6-A3）：换头像后删除旧图。 */
+    private final StorageService storageService;
 
     @Override
     public UserVO getProfile() {
@@ -52,7 +55,7 @@ public class UserServiceImpl implements UserService {
     @Transactional(rollbackFor = Exception.class)
     public void updateProfile(UpdateProfileRequest request) {
         Long userId = UserContext.requireUserId();
-        ensureUserExists(userId);
+        User current = ensureUserExists(userId);
 
         // 非全量更新：仅更新非 null 字段（允许显式传入空串以清空可选字段）
         var wrapper = Wrappers.<User>lambdaUpdate().eq(User::getId, userId);
@@ -65,8 +68,10 @@ public class UserServiceImpl implements UserService {
             wrapper.set(User::getPhone, request.getPhone().trim());
             changed = true;
         }
+        String oldAvatar = current.getAvatar();
+        String newAvatar = request.getAvatar() == null ? null : request.getAvatar().trim();
         if (request.getAvatar() != null) {
-            wrapper.set(User::getAvatar, request.getAvatar().trim());
+            wrapper.set(User::getAvatar, newAvatar);
             changed = true;
         }
         if (!changed) {
@@ -74,6 +79,16 @@ public class UserServiceImpl implements UserService {
         }
         userMapper.update(null, wrapper);
         log.info("个人资料更新成功: userId={}", userId);
+
+        // 批次 6.0.5.2 · M6-A3：换了头像就删掉旧图（先更 DB 再动文件；失败只告警不阻塞）
+        if (newAvatar != null && oldAvatar != null && !oldAvatar.equals(newAvatar)) {
+            try {
+                storageService.delete(oldAvatar);
+                log.info("旧头像已清理: userId={}", userId);
+            } catch (Exception e) {
+                log.warn("删除旧头像失败（降级，不阻塞业务）: userId={}, err={}", userId, e.getMessage());
+            }
+        }
     }
 
     @Override
@@ -149,12 +164,16 @@ public class UserServiceImpl implements UserService {
 
     // ------------------------------------------------------------------ 内部实现
 
-    private void ensureUserExists(Long userId) {
+    /**
+     * 校验用户存在并返回（<b>返回实体</b>是为了拿到旧头像做文件清理，批次 6.0.5.2 · M6-A3）。
+     */
+    private User ensureUserExists(Long userId) {
         User user = userMapper.selectOne(Wrappers.<User>lambdaQuery()
-                .select(User::getId)
+                .select(User::getId, User::getAvatar)
                 .eq(User::getId, userId));
         if (user == null) {
             throw BusinessException.unauthorized();
         }
+        return user;
     }
 }

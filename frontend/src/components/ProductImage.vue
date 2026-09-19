@@ -1,11 +1,15 @@
 <script setup>
 /**
- * 商品图片（带占位兜底）
+ * 商品图片（带占位兜底 + 一次降级）
  *
  * 为什么需要这个组件：
  *   后端 uploads 目录当前是空的 —— seed 数据里的 /static/uploads/demo*.jpg 并不存在，
  *   所有商品图都会 404。若直接写 <img>，列表页会是一堆浏览器的「碎图」图标，论文截图很难看。
  *   这里统一降级为「浅绿渐变 + 图标」的占位图，观感上像是刻意设计的空态。
+ *
+ * 降级链（批次 6.0.5.2 · M6-A4 起）：src 失败 → fallbackSrc（一次）→ 占位图。
+ *   列表页用 400px 缩略图（thumbUrl）省流量，但演示数据与"缩略图生成失败"的文件没有缩略图，
+ *   必须能退回原图，否则列表会从「有图」退化成「暂无图片」。
  *
  * 另外 @error 只触发一次（用 failed 标记挡住），避免死循环。
  */
@@ -21,22 +25,49 @@ const props = defineProps({
   /** 宽高比，如 '4 / 3'、'1 / 1' */
   ratio: { type: String, default: '4 / 3' },
   /** 占位图标尺寸 */
-  iconSize: { type: Number, default: 34 }
+  iconSize: { type: Number, default: 34 },
+  /**
+   * 一次性降级地址：src 加载失败时改用它（通常是原图）。
+   * 为空表示不降级，直接显示占位图。
+   */
+  fallbackSrc: { type: String, default: '' }
 })
 
-const failed = ref(false)
+/** src 是否已加载失败（失败后切到 fallbackSrc） */
+const srcFailed = ref(false)
+
+/** fallbackSrc 是否也失败（此时才落到占位图） */
+const fallbackFailed = ref(false)
 
 const resolved = computed(() => resolveImageUrl(props.src))
+const resolvedFallback = computed(() => resolveImageUrl(props.fallbackSrc))
 
-/** src 变化时重置失败标记，否则复用组件时会一直显示占位图 */
+/** 当前实际使用的地址：src → fallbackSrc → 空（空则渲染占位图） */
+const currentSrc = computed(() => {
+  if (!srcFailed.value) return resolved.value
+  if (!fallbackFailed.value) return resolvedFallback.value
+  return ''
+})
+
+/** src / fallbackSrc 变化时重置降级状态，否则复用组件时会一直显示占位图 */
 watch(
-  () => props.src,
+  () => [props.src, props.fallbackSrc],
   () => {
-    failed.value = false
+    srcFailed.value = false
+    fallbackFailed.value = false
   }
 )
 
-const showPlaceholder = computed(() => !resolved.value || failed.value)
+const showPlaceholder = computed(() => !currentSrc.value)
+
+/** 图片加载失败：第一次切 fallbackSrc，第二次才落到占位图（最多两次，不会死循环） */
+function handleError() {
+  if (!srcFailed.value) {
+    srcFailed.value = true
+    return
+  }
+  fallbackFailed.value = true
+}
 </script>
 
 <template>
@@ -44,10 +75,10 @@ const showPlaceholder = computed(() => !resolved.value || failed.value)
     <img
       v-if="!showPlaceholder"
       class="cm-image__img"
-      :src="resolved"
+      :src="currentSrc"
       :alt="alt"
       loading="lazy"
-      @error="failed = true"
+      @error="handleError"
     />
     <div v-else class="cm-image__placeholder">
       <el-icon :size="iconSize"><Picture /></el-icon>
