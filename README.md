@@ -1,4 +1,4 @@
-# 校园二手交易平台（V35 对齐）
+# 校园二手交易平台（V36 对齐）
 
 Java 21 + Spring Boot 3 + MyBatis-Plus + MySQL 8.0 + Redis + Flyway + ShedLock 的后端，
 Vue 3 + Vite + Element Plus 的前端。统一包名 `com.campus.market`，接口统一前缀 `/api/v1/`。
@@ -11,7 +11,7 @@ Vue 3 + Vite + Element Plus 的前端。统一包名 `com.campus.market`，接�
 | 后端 | Java 21、Spring Boot 3.2.5、MyBatis-Plus 3.5.5、MySQL 8.0、Redis、Flyway 10、ShedLock 5.10、jjwt 0.12.5、knife4j 4.4 + springdoc 2.3 |
 | 前端 | Vue 3（`<script setup>`）、Pinia、Vue Router 4、Element Plus 2.14、ECharts 6.1、Vite 5.4、Vitest + @vue/test-utils |
 
-> 版本号 `V35` 指 `PROJECT_CONTEXT.md` 头部变更记录中的当前版本（V35 = 支付回调金额校验；V34 = 前端倒计时按 trade_type 分档；V33 = 自审 Minor 1~9 收尾）。
+> 版本号 `V36` 指 `PROJECT_CONTEXT.md` 头部变更记录中的当前版本（V36 = AI RAG 实施基线（5.6.1 设计批）；V35 = 支付回调金额校验；V34 = 前端倒计时按 trade_type 分档）。
 > 各文档的版本对齐口径见「六、文档索引与同步约定」。
 
 ---
@@ -21,6 +21,7 @@ Vue 3 + Vite + Element Plus 的前端。统一包名 `com.campus.market`，接�
 | 交付物 | 路径 |
 | :--- | :--- |
 | 接口清单（路径 / 方法 / 请求 / 响应 / 错误码 / 路径语义） | `docs/API_INTERFACE_SPEC.md` |
+| AI RAG 设计基线（ES 索引 / Embedding 选型 / 同步策略 / 分批与风险 / 待拍板项） | `docs/ai-rag-design.md` |
 | 项目上下文（分章设计说明、变更记录、错误码表） | `PROJECT_CONTEXT.md` |
 | 自审报告（安全问题台账 + 修复记录） | `docs/自审报告-2026-09-19.md` |
 | Flyway 建表脚本（8 张表 + FULLTEXT 索引迁移） | `src/main/resources/db/migration/V1__init.sql`、`V2__add_fulltext_index.sql` |
@@ -281,6 +282,7 @@ prod 还多两道启动断言（fail-fast，见 `EmailCodeServiceImpl#assertSkip
 | `docs/自审报告-2026-09-19.md` | 安全问题台账（含"未能验证的部分"） | 修复问题后同步勾选（统一标 `已修复（批次号）`），未修的保持原状 |
 | `api-tests.http` | 可直接执行的端到端验收用例集 | 端点新增/变更时补用例 |
 | `frontend/README.md` | 前端工程说明（目录树、后端对接坑、设计规范、测试与门禁） | 前端目录结构、页面范围、测试数字变化时 |
+| `docs/ai-rag-design.md` | AI RAG 实施基线（5.6.x 的设计依据：索引映射、检索策略、Embedding 选型、同步与降级、分批验收） | 索引 mapping / 检索策略 / 模型选型变化时（5.6.2~5.6.5 每批都要回看它） |
 
 同步规则（每批收尾必查）：
 

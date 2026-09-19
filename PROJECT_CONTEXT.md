@@ -1,4 +1,5 @@
-校园二手交易平台 - 项目需求与设计文档 (AI Context 正式封版 V35)
+校园二手交易平台 - 项目需求与设计文档 (AI Context 正式封版 V36)
+V36 核心变更：新增 5.6.x「AI RAG 智能导购」实施基线（设计批 5.6.1，产出 `docs/ai-rag-design.md`）—— 第 4 章补"实施基线"段：ES 索引 `campus_product_v1`（IK 分词 + `dense_vector(dims=1024, cosine)`）与别名策略、BM25 ⊕ kNN 双路召回 + RRF 融合、Embedding 选型对比（推荐本地 Ollama + bge-m3）、MySQL↔ES 双写与每日重建 + 降级链、RAG 生成层的可失败设计、5.6.1~5.6.5 分批与验收。**本批不改任何代码/配置/依赖**（纯审计 + 设计），并记录了两处有待拍板的主动偏离（是否引入 Spring AI、接口是否改信封）。技术设计不变，仅追加设计基线与文档。
 V35 核心变更：S3 遗留批 —— 支付回调**金额校验**补齐（自审报告 S3 的最后一块）。签名 payload 由三段 `orderNo|tradeNo|timestamp` 改为四段 `orderNo|tradeNo|amount|timestamp`（amount 固定 2 位小数，`setScale(2, HALF_UP).toPlainString()`），服务端在查订单后用 `BigDecimal.compareTo` 与 `tb_order.amount`（DECIMAL(10,2)）比对；`PayCallbackRequest` 新增 `amount`（`@NotNull` + `@DecimalMin(0.01)` + `@DecimalMax(99999999.99)`）；校验顺序固定为「参数校验 → 验签 → 查订单 → 金额比对 → 去重读侧 → 状态判断」**全部在事务外**，只有状态机在事务内（新增 `PayCallbackProcessor`，独立 Bean 才有事务），去重键在写库提交后落（6.0.6 · Minor 9 的约定保持）；订单状态非 0/1 时由"静默返回 false"改为 **209**；旧三段签名不再兼容。新增 3.9.10「支付回调约定」。技术设计不变，仅追加实现约定与踩坑记录。
 V34 核心变更：前端倒计时按 trade_type 分档（批次 6.0.7）—— 补上 6.0.6 · Minor 3 遗留的前后端不一致：`constants.js` 新增 `PAY_TIMEOUT_MAIL_MINUTES(15) / PAY_TIMEOUT_FACE_MINUTES(120)` 与 `payTimeoutMinutes(tradeType)`，`PayCountdown` 新增 `tradeType` prop，订单成功页 / 订单详情页 / 订单卡片 / 下单成功提示全部按订单 `trade_type` 取窗口；`ORDER_STATUS_MAP[0].actionHint` 去掉写死的分钟数改为通用文案（具体分钟数由 `orderStatusHint(status, tradeType)` 计算）。技术设计不变，仅追加实现约定与踩坑记录。
 V33 核心变更：Minor 1~9 收尾（批次 6.0.6）——未完成订单集合补「5-冻结」、封禁冻结集合补「7-退款被拒」、待支付超时取消按交易方式分档（邮寄 15 分钟 / 面交 120 分钟，均可配置）、下单 `quantity` 上限 100、日志 CR/LF 清洗、验证码 Key 按 scene 隔离（`email:code:{scene}:{email}`）、商品图片地址协议/前缀白名单、支付回调去重键改到事务提交后写；新增 3.9.9「Minor 收尾约定」。技术设计不变，仅追加实现约定与踩坑记录。
@@ -1062,6 +1063,13 @@ MVP 商品量上限 5000 条，超过该量级必须引入 MySQL FULLTEXT（ngra
 后期规划：Spring AI + ES 8.x（dense_vector + kNN + IK 分词器），向量模型 BGE-M3。
 
 接口预留：GET /api/v1/ai/search?query=自然语言。
+
+**5.6.x 实施基线（5.6.1 设计批产出）**：见 `docs/ai-rag-design.md`。要点与上面"后期规划"的两处**主动偏离**（有待拍板确认）：
+① 建议**不引入 Spring AI**，改用 ES 官方 Java Client + Spring `RestClient` 直连 Ollama HTTP（`POST /api/embed`）——
+原因是 Spring AI 与本项目 Boot 3.2.5 的版本矩阵需单独核对，而升级 Boot 会牵动 MyBatis-Plus/ShedLock/springdoc/knife4j 一串依赖；
+② 检索策略定为**BM25 ⊕ kNN 双路召回 + RRF 融合**（而非单纯 kNN），并保留"ES 挂 → MySQL FULLTEXT → LIKE"的降级链。
+ES 侧：索引 `campus_product_v1` + 别名 `campus_product`、IK 分词、`dense_vector(dims=1024, cosine, HNSW)`。
+分批：5.6.1 设计（本批）→ 5.6.2 依赖与配置接入 → 5.6.3 写入与同步 → 5.6.4 检索链路 → 5.6.5 生成层 + 前端 + 评测。
 
 5. 全局 HTTP 状态码、错误码与统一响应规范
 HTTP 状态码与业务错误码分离：业务接口一律 HTTP 200，业务结果由 body.code 区分。仅未登录/Token失效返回 HTTP 401。

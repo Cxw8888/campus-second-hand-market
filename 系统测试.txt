@@ -846,6 +846,50 @@ V35 / S3 遗留批测试结果（支付回调金额校验：签名覆盖金额 +
 	· 真机脚本创建的测试账号/商品/订单仍留在 dev 库（沿用既有做法，答辩前统一清理）
 
 
+===============================================================
+5.6.1 AI RAG 环境准备与数据模型设计批（审计批，未改任何代码）
+===============================================================
+测试时间	2026-09-19 18:2x（审计与探测）
+测试范围	只做审计 + 设计 + 用户操作清单：**未改任何 Java/前端代码、未改配置、未装依赖**
+		（可用 `git show --stat` 核对：本批提交只含 `docs/ai-rag-design.md` 与文档同步）
+产出		docs/ai-rag-design.md（ES 索引设计 / Embedding 选型对比 / 同步与降级 / RAG 生成层 / 分批验收 / 风险 / 用户操作清单 / 待拍板项）
+
+一、现状审计（源码核实）
+	AiSearchService/AiSearchServiceImpl	GET /api/v1/ai/search?query= → MySQL 参数化 LIKE（title/description），
+		可选认证，返回 Result<PageResult<ProductListVO>>；**无缓存、无熔断**
+	RedisKeys.AI_SEARCH_PREFIX="ai:search:"	**零引用**（只在 javadoc 里被提到）→ 5.6.4 接线时才启用
+	前端调用		frontend/src 搜 ai/search / aiSearch **零命中**（当前只有后端契约与论文叙述）
+	对照：普通列表	/product/list 已有 FULLTEXT(ngram) + LIKE 降级 + 60s 缓存 + 500ms 熔断（5.4.4/5.4.5）
+	pom.xml		无 ES 客户端、无 Spring AI；micrometer-registry-prometheus 是**注释掉的可选依赖**；
+		management 只暴露 health（与文档一致）
+
+二、环境实测（本次实跑，非推断）
+	Elasticsearch 9200	未监听（未安装）
+	Ollama 11434		未监听（未安装）
+	MySQL 3306 / Redis 6379	监听中（8.0.46 / 5.0.14）
+	Docker			未安装；WSL **未启用**（wsl.exe 只是占位）→ ES/Ollama 必须装 Windows 原生版
+	curl.exe		可用（C:\Windows\system32\curl.exe）；JDK 21.0.12 在 C:\Users\chen\.jdks\ms-21.0.12（不在 PATH）
+	CPU			16 逻辑核
+	磁盘/内存		本会话被沙箱拒绝查询（Get-Volume / CIM 均拒绝访问）→ 已列入用户操作清单第 1 步由用户自查
+
+三、设计结论（要点，详见 docs/ai-rag-design.md）
+	索引		campus_product_v1 + 别名 campus_product；单分片 0 副本；IK(ik_max_word/ik_smart) + ngram 降级
+	向量		dense_vector dims=1024 / cosine / HNSW；换模型必须重建索引（dims 不可改）
+	检索		硬过滤(status=1) + BM25 ⊕ kNN 双路召回（各 top50）→ RRF(k=60) 融合 → top-k → 回表补 VO
+	Embedding	推荐本地 Ollama + bge-m3(1024)；备选云 API（对照实验）与 Spring AI ONNX MiniLM(384)
+	依赖取舍	建议**不引入 Spring AI**（Boot 3.2.5 与 Spring AI 的版本矩阵需单独核对；升级 Boot 属架构级变更）
+	同步		DB 提交后双写 ES（失败只告警，不回滚）+ 每日全量重建（ShedLock）+ ES 挂 → FULLTEXT → LIKE 降级
+	一致性坑	① 缓存键必须带 mode（否则降级结果被当 RAG 结果缓存）② 改标题/描述必须重算向量
+
+四、没能验证的部分（本批本就无法验证）
+	· ES/Ollama 未安装，**所有 ES/Qdrant 语句、维度、分词效果均未实测**（mapping 是按 ES 8.x 语法写的，未跑过）
+	· bge-m3 的向量维度按公开资料写为 1024，**未在本机实测**（已列入用户操作清单：装好后回填实测维度）
+	· IK 插件版本与 ES 版本的配套关系未验证（需用户在下载页核对）
+	· 磁盘/内存余量未确认（沙箱拒绝），因此"ES 单节点 + Ollama 能否共存"未实测
+	· 检索效果（Recall@10 / MRR）无数据 —— 属于 5.6.5 的评测任务
+
+
+
 
 
 
