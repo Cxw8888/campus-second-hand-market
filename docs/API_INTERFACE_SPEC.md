@@ -113,6 +113,7 @@
 | 4.8 | PUT | `/api/v1/order/ship/{id}` | 强制认证（卖家） | - | `status: 1→2`，`ship_time=NOW()`，仅 `trade_type IN (2,3)`；面交发货 → 209 |
 | 4.9 | PUT | `/api/v1/order/receive/{id}` | 强制认证（买家） | - | 邮寄 `2→3`；面交 `1→3`（`trade_type=1`）；`finish_time=NOW()` |
 | 4.10 | PUT | `/api/v1/order/finish-face/{id}` | 强制认证（**卖家 seller_id 校验**） | - | 面交直接完成 `0→3`；买家调用 → 203 |
+| 4.10b | PUT | `/api/v1/order/finish-face-seller/{id}` | 强制认证（**卖家 seller_id 校验**，批次 6.0.5.1 · M2 新增） | - | **已支付面交单 `1→3`**，`finish_time=NOW()`，通知买家；与买家 `receive`（面交 1→3）对称。非卖家 → 203；`status≠1` 或 `trade_type≠1` → 209；已是 3 → 200「请勿重复操作」 |
 | 4.11 | POST | `/api/v1/order/refund/apply/{id}` | 强制认证（买家） | `reason` | `status IN (1,2) → 6`，`refund_apply_time=NOW()`；7 状态再操作 → 206 |
 | 4.12 | PUT | `/api/v1/order/refund/agree/{id}` | 强制认证（卖家） | - | `6→4`，`cancel_time=NOW()` + **库存回补** |
 | 4.13 | PUT | `/api/v1/order/refund/reject/{id}` | 强制认证（卖家） | `rejectReason` | `6→7`，`refund_reject_time=NOW()`；3 天后定时任务自动恢复 1/2 |

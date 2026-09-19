@@ -66,6 +66,17 @@ public interface OrderService {
     /** 面交直接完成（0→3，<b>必须用 seller_id 校验</b>）。 */
     OrderVO finishFaceToFace(Long id);
 
+    /**
+     * 卖家确认面交完成（<b>1→3</b>，批次 6.0.5.1 · M2 新增）。
+     *
+     * <p>适用场景：买家已支付（status=1）的面交单，买家失联/临时有事无法确认收货时，
+     * 由卖家推进到终态。与买家侧的 {@link #receive(Long)}（面交 1→3）<b>对称</b>，谁先确认都行。</p>
+     *
+     * <p>校验：订单存在（否则 203）→ 当前用户是卖家（否则 203）→ SQL 限定
+     * {@code status = 1 AND trade_type = 1}（否则 209）。成功后通知买家。</p>
+     */
+    OrderVO finishFaceBySeller(Long id);
+
     /** 买家申请退款（1/2→6）。 */
     OrderVO applyRefund(Long id, RefundApplyRequest request);
 

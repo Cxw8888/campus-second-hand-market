@@ -29,6 +29,7 @@ import {
   agreeRefund,
   applyRefund,
   cancelOrder,
+  finishFaceBySellerOrder,
   finishFaceOrder,
   getOrderDetail,
   payOrder,
@@ -98,6 +99,13 @@ const sellerUnavailable = computed(() => !productInfo.value)
 const canPay = computed(() => isPending.value && isBuyer.value)
 const canCancel = computed(() => isPending.value && isBuyer.value)
 const canFinishFace = computed(() => isPending.value && isSeller.value && isFace.value)
+/**
+ * 卖家确认面交完成（已支付面交单 1→3）
+ *
+ * 6.0.5.1 · M2 新增：修前后端「已支付面交单」没有任何终态路径（买家失联时卖家只能干等），
+ * 因此这里给卖家补一个按钮，与买家侧的「确认收货」对称。
+ */
+const canFinishPaidFace = computed(() => status.value === 1 && isSeller.value && isFace.value)
 const canApplyRefund = computed(() => status.value === 1 && isBuyer.value)
 const canShip = computed(() => status.value === 1 && isSeller.value && !isFace.value)
 const canReceive = computed(() => status.value === 2 && isBuyer.value)
@@ -110,6 +118,7 @@ const hasActions = computed(
     canPay.value ||
     canCancel.value ||
     canFinishFace.value ||
+    canFinishPaidFace.value ||
     canApplyRefund.value ||
     canShip.value ||
     canReceive.value ||
@@ -276,6 +285,25 @@ function handleFinishFace() {
       confirmText: '确认已完成'
     },
     request: () => finishFaceOrder(orderId.value),
+    successText: '订单已完成'
+  })
+}
+
+/**
+ * 卖家确认面交完成（已支付面交单 1→3）
+ *
+ * 文案要写清"买家已付款、线下已交付"这个前提：本接口不是退款入口，
+ * 一旦确认订单即进入终态，线上流程不再可逆（与买家的确认收货同等效力）。
+ */
+function handleFinishPaidFace() {
+  runAction({
+    confirm: {
+      message:
+        '确认已经与买家完成线下面交并交付商品？\n确认后订单将变为「已完成」，线上流程不可再撤销。',
+      title: '确认面交完成',
+      confirmText: '确认已完成'
+    },
+    request: () => finishFaceBySellerOrder(orderId.value),
     successText: '订单已完成'
   })
 }
@@ -601,6 +629,18 @@ onMounted(() => reloadAll(true))
           @click="handleFinishFace"
         >
           确认已完成
+        </el-button>
+
+        <!-- 卖家确认面交完成（已支付面交单 1→3，6.0.5.1 · M2）：买家失联时卖家可推进到终态 -->
+        <el-button
+          v-if="canFinishPaidFace"
+          size="large"
+          round
+          type="primary"
+          :loading="acting"
+          @click="handleFinishPaidFace"
+        >
+          确认面交完成
         </el-button>
 
         <!-- 去支付：橙→金渐变，与其余页面保持同一视觉语言 -->

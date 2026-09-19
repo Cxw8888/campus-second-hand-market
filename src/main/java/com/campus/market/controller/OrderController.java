@@ -108,6 +108,14 @@ public class OrderController {
         return Result.success(orderService.finishFaceToFace(id));
     }
 
+    @Operation(summary = "卖家确认面交完成",
+            description = "已支付面交单 1→3，由卖家发起（与买家确认收货 1→3 对称）；"
+                    + "仅 trade_type=1 且 status=1 可调用，否则 209；非卖家 203")
+    @PutMapping("/finish-face-seller/{id}")
+    public Result<OrderVO> finishFaceBySeller(@PathVariable Long id) {
+        return Result.success(orderService.finishFaceBySeller(id));
+    }
+
     @Operation(summary = "买家申请退款", description = "1/2→6")
     @PostMapping("/refund/apply/{id}")
     public Result<OrderVO> applyRefund(@PathVariable Long id, @Valid @RequestBody RefundApplyRequest request) {

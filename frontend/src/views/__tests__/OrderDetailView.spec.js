@@ -18,6 +18,7 @@ import ElementPlus from 'element-plus'
 
 const getOrderDetailMock = vi.fn()
 const getProductDetailMock = vi.fn()
+const finishFaceBySellerMock = vi.fn()
 
 vi.mock('@/api/order', () => ({
   getOrderDetail: (...a) => getOrderDetailMock(...a),
@@ -26,6 +27,7 @@ vi.mock('@/api/order', () => ({
   shipOrder: vi.fn(),
   receiveOrder: vi.fn(),
   finishFaceOrder: vi.fn(),
+  finishFaceBySellerOrder: (...a) => finishFaceBySellerMock(...a),
   applyRefund: vi.fn(),
   agreeRefund: vi.fn(),
   rejectRefund: vi.fn()
@@ -223,5 +225,123 @@ describe('OrderDetailView 四种加载状态', () => {
     await flushPromises()
     expect(getOrderDetailMock).toHaveBeenCalledTimes(2)
     expect(hasSkeleton(wrapper)).toBe(false)
+  })
+})
+
+/**
+ * 6.0.5.1 · M2：卖家确认面交完成（已支付面交单 1→3）
+ *
+ * 守的是「已支付 + 面交」这一类订单的**按钮可见性规则**（项目约定：状态规则必须有单测）：
+ *   卖家看到「确认面交完成」；买家看到的是「申请退款」；邮寄单卖家看到的是「发货」。
+ * 最后一例走真实 ElMessageBox（与 AdminProductAuditView 的用例同一套路），
+ * 验证「弹窗确认 → 调接口 → 刷新」这条链路真的接通。
+ */
+describe('OrderDetailView 卖家确认面交完成（6.0.5.1 · M2）', () => {
+  /** 已支付、面交、待收货（修复前"无路可走"的那一类订单） */
+  const PAID_FACE_ORDER = { ...ORDER, status: 1, tradeType: 1, payTime: '2026-09-19 10:00:00' }
+  const SELLER_ID = String(ORDER.sellerId) // '16'
+  const BUYER_ID = String(ORDER.userId) // '17'
+
+  /**
+   * ⚠️ 必须按【按钮】断言，不能对整页 text() 做包含判断：
+   *   订单进度时间线里本来就有「卖家 / 确认面交完成」这样的节点文案，
+   *   用 wrapper.text() 判包含会把时间线误判成按钮（本批实测踩到过）。
+   */
+  const buttonTexts = (wrapper) => wrapper.findAll('button').map((b) => b.text())
+  const hasButton = (wrapper, label) => buttonTexts(wrapper).some((t) => t.includes(label))
+
+  async function mountAs(userId, order) {
+    getOrderDetailMock.mockResolvedValue(order)
+    const router = makeRouter()
+    await router.push('/order/detail/68')
+    await router.isReady()
+
+    const pinia = createPinia()
+    setActivePinia(pinia)
+    useUserStore().userInfo = { userId, nickname: '同学' }
+
+    const wrapper = mount(OrderDetailView, {
+      global: { plugins: [pinia, router, ElementPlus], stubs: { transition: false } }
+    })
+    await flushPromises()
+    return wrapper
+  }
+
+  beforeEach(() => {
+    globalThis.ResizeObserver = ResizeObserverStub
+    document.body.innerHTML = ''
+    vi.clearAllMocks()
+    getProductDetailMock.mockResolvedValue({
+      id: '30',
+      title: '考研数学复习全书 九成新',
+      sellerNickname: '数院小周',
+      tradeLocation: '图书馆一楼大厅',
+      imageUrls: []
+    })
+  })
+
+  afterEach(() => {
+    document.body.innerHTML = ''
+  })
+
+  it('⑦ 卖家 + 已支付 + 面交 → 显示「确认面交完成」按钮', async () => {
+    const wrapper = await mountAs(SELLER_ID, PAID_FACE_ORDER)
+
+    expect(hasSkeleton(wrapper)).toBe(false)
+    expect(hasButton(wrapper, '确认面交完成')).toBe(true)
+    // 待支付的「确认已完成」此时不该出现（那是 0→3 的路径），买家侧的按钮也不该出现
+    expect(hasButton(wrapper, '去支付')).toBe(false)
+    expect(hasButton(wrapper, '申请退款')).toBe(false)
+  })
+
+  it('⑧ 买家 + 已支付 + 面交 → 没有该按钮（买家走「申请退款」）', async () => {
+    const wrapper = await mountAs(BUYER_ID, PAID_FACE_ORDER)
+
+    expect(hasButton(wrapper, '确认面交完成')).toBe(false)
+    expect(hasButton(wrapper, '申请退款')).toBe(true)
+  })
+
+  it('⑨ 邮寄单 + 已支付 + 卖家 → 显示「发货」，不显示「确认面交完成」', async () => {
+    const wrapper = await mountAs(SELLER_ID, { ...PAID_FACE_ORDER, tradeType: 2 })
+
+    expect(hasButton(wrapper, '发货')).toBe(true)
+    expect(hasButton(wrapper, '确认面交完成')).toBe(false)
+  })
+
+  it('⑩ 点「确认面交完成」→ 真实确认弹窗 → 确认后调接口并刷新详情', async () => {
+    const wrapper = await mountAs(SELLER_ID, PAID_FACE_ORDER)
+    const before = getOrderDetailMock.mock.calls.length
+
+    const btn = wrapper.findAll('button').find((b) => b.text().includes('确认面交完成'))
+    expect(btn).toBeTruthy()
+    await btn.trigger('click')
+    await flushPromises()
+
+    // ElMessageBox 挂到 body 上，用 document 查（与 AdminProductAuditView ⑦ 同一套路）
+    const confirmBtn = document.querySelector('.el-message-box__btns .el-button--primary')
+    expect(confirmBtn).toBeTruthy()
+    confirmBtn.click()
+    await flushPromises()
+    await flushPromises()
+
+    expect(finishFaceBySellerMock).toHaveBeenCalledTimes(1)
+    expect(finishFaceBySellerMock).toHaveBeenCalledWith('68')
+    // 操作成功后必须刷新详情（runAction 里的 reloadAll(false)）
+    expect(getOrderDetailMock.mock.calls.length).toBe(before + 1)
+  })
+
+  it('⑪ 取消确认弹窗 → 不发请求', async () => {
+    const wrapper = await mountAs(SELLER_ID, PAID_FACE_ORDER)
+
+    const btn = wrapper.findAll('button').find((b) => b.text().includes('确认面交完成'))
+    await btn.trigger('click')
+    await flushPromises()
+
+    const cancelBtn = document.querySelector('.el-message-box__btns .el-button:not(.el-button--primary)')
+    expect(cancelBtn).toBeTruthy()
+    cancelBtn.click()
+    await flushPromises()
+
+    expect(finishFaceBySellerMock).not.toHaveBeenCalled()
   })
 })

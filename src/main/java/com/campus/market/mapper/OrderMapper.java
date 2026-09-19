@@ -58,6 +58,20 @@ public interface OrderMapper extends BaseMapper<Order> {
     int finishFaceToFace(@Param("id") Long id, @Param("sellerId") Long sellerId);
 
     /**
+     * 卖家确认面交完成（已支付面交单 1→3，批次 6.0.5.1 · M2 新增）。
+     *
+     * <p>与 {@link #receiveByFace(Long, Long)}（买家确认，1→3）<b>对称</b>：面交场景下买卖双方
+     * 谁先确认都行。补这条路径是为了修自审报告 M2 —— 修前已支付的面交单（status=1, trade_type=1）
+     * <b>没有任何终态路径</b>：买家失联后卖家只能干等（自动收货只覆盖 status=2），订单永久停在 1。</p>
+     *
+     * <p>SQL 层三重守卫：{@code status = 1}（未支付/已完成都不放行）、
+     * {@code trade_type = 1}（邮寄单严禁走面交完成，与"面交严禁发货"对称）、
+     * {@code seller_id = ?}（权限必须用卖家身份校验，严禁用 user_id）。</p>
+     */
+    @Update("UPDATE tb_order SET status = 3, finish_time = NOW() WHERE id = #{id} AND status = 1 AND trade_type = 1 AND seller_id = #{sellerId} AND is_deleted = 0")
+    int finishFaceBySeller(@Param("id") Long id, @Param("sellerId") Long sellerId);
+
+    /**
      * 买家申请退款（1/2→6）：校验 user_id 归属。
      */
     @Update("UPDATE tb_order SET status = 6, refund_apply_time = NOW(), refund_reason = #{reason} WHERE id = #{id} AND status IN (1,2) AND user_id = #{userId} AND is_deleted = 0")

@@ -744,15 +744,33 @@ public class ProductServiceImpl implements ProductService {
     /**
      * 编辑后的状态流转：
      * <ul>
-     *   <li>status=2-售罄：新库存 &gt; 0 → 1-上架中，否则保持 2；</li>
+     *   <li>status=2-售罄：<b>关键字段变更 → 3-待审核</b>（批次 6.0.5.1 · M5）；
+     *       否则按库存走：新库存 &gt; 0 → 1-上架中，否则保持 2；</li>
      *   <li>status=0-下架 / 3-待审核：重置为 3-待审核；</li>
-     *   <li>status=1-上架中：关键字段（title/description/imageUrls/price/conditionLevel）变更 → 重置为 3，
+     *   <li>status=1-上架中：关键字段变更 → 重置为 3，
      *       非关键字段（tradeLocation/tradeType）直接生效。</li>
      * </ul>
+     *
+     * <p><b>M5 修的是什么</b>：修前 SOLD_OUT 分支只看新库存、<b>完全不看 {@code criticalChanged}</b> ——
+     * 于是"售罄 → 改价/改标题/换图 + 补库存"会直接回到 {@code 1-上架中}，<b>整段跳过审核</b>。
+     * 这条路径比常规编辑更危险：售罄商品往往已经过一轮审核，卖家可以拿着"已审核"的壳子
+     * 换成任意标题/图片/价格后立刻重新在售。现在它与其他状态<b>用同一条规则</b>：
+     * 关键字段一改就必须重审。</p>
+     *
+     * <p><b>为什么带库存判断的旧行为要保留在"非关键变更"分支</b>：卖家把库存补回来（不改文案）
+     * 属于正常经营动作，重审没有意义；此时按 1/2 走（库存 &gt; 0 → 在售）。</p>
+     *
+     * <p>注意（未在本批处理）：关键字段变更 + <b>没有</b>补库存时也会进 3，审核通过后回到 1
+     * 而库存仍为 0（"列表可见却买不到"）。这与 status=1 分支的既有行为一致，
+     * 属自审报告 Minor 6（{@code resolveStatus} 不看新库存），留给 6.0.5.2。</p>
      */
     private int resolveStatus(Integer currentStatus, Integer newStock, boolean criticalChanged) {
         int current = currentStatus == null ? ProductStatus.PENDING_AUDIT : currentStatus;
         if (current == ProductStatus.SOLD_OUT) {
+            // M5：售罄商品改关键字段（title/description/imageUrls/price/conditionLevel）→ 与"上架中"同规则，必须重审
+            if (criticalChanged) {
+                return ProductStatus.PENDING_AUDIT;
+            }
             return newStock != null && newStock > 0 ? ProductStatus.ON_SALE : ProductStatus.SOLD_OUT;
         }
         if (current == ProductStatus.OFF_SHELF || current == ProductStatus.PENDING_AUDIT) {
@@ -761,6 +779,16 @@ public class ProductServiceImpl implements ProductService {
         return criticalChanged ? ProductStatus.PENDING_AUDIT : ProductStatus.ON_SALE;
     }
 
+    /**
+     * 关键字段是否变更（与 {@link #resolveStatus} 配合决定是否重审）。
+     *
+     * <p>关键字段 = {@code title / description / conditionLevel / price / imageUrls}：
+     * 它们直接决定买家看到的内容与成交价，属于"必须重新过审"的范畴；
+     * 非关键字段 = {@code tradeLocation / tradeType}（面交地点、交易方式），改完直接生效。</p>
+     *
+     * <p>price 用 {@link #samePrice(BigDecimal, BigDecimal)} 按 {@code compareTo} 比较，
+     * 避免 {@code 45} 与 {@code 45.00} 因 scale 不同被误判成"改过价"而触发无谓重审。</p>
+     */
     private boolean isCriticalChanged(Product product, ProductSaveRequest request, List<String> imageUrls) {
         String newTitle = request.getTitle() == null ? null : request.getTitle().trim();
         return !Objects.equals(product.getTitle(), newTitle)

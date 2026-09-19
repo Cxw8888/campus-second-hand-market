@@ -293,6 +293,41 @@ public class OrderServiceImpl implements OrderService {
         return reloadVO(id);
     }
 
+    /**
+     * 卖家确认面交完成（已支付面交单 1→3，批次 6.0.5.1 · M2）。
+     *
+     * <p>修的是自审报告 M2：已支付的面交单（status=1, trade_type=1）此前<b>没有任何终态路径</b> ——
+     * {@code finishFaceToFace} 要求 status=0、{@code receiveByFace} 是买家操作、
+     * 自动收货只覆盖 status=2。买家付款后失联（校园场景高发：约好面交但临时有事），
+     * 卖家只能干等，订单永久停在 1。</p>
+     *
+     * <p>权限与状态守卫：归属用 <b>seller_id</b>（严禁 user_id）；状态与交易方式交给 SQL 的
+     * {@code status = 1 AND trade_type = 1} 判定，影响行数 0 时：</p>
+     * <ul>
+     *   <li>当前已是 3-已完成 → 200 +「请勿重复操作」（与其它状态变更接口一致）；</li>
+     *   <li>其它（status=0/2/4… 或邮寄单 trade_type≠1）→ 209「当前状态不允许此操作」。</li>
+     * </ul>
+     */
+    @Override
+    @Transactional(rollbackFor = Exception.class)
+    public OrderVO finishFaceBySeller(Long id) {
+        Long sellerId = UserContext.requireUserId();
+        Order order = requireOrder(id);
+        // 面交完成由卖家确认：权限必须用 seller_id（与 finishFaceToFace / ship 一致）
+        if (!sellerId.equals(order.getSellerId())) {
+            throw BusinessException.noPermission("无权操作该订单");
+        }
+        if (OrderStatus.FINISHED == order.getStatus()) {
+            throw new BusinessException(ErrorCode.SUCCESS, "请勿重复操作");
+        }
+        int rows = orderMapper.finishFaceBySeller(id, sellerId);
+        ensureStateChanged(rows, order.getStatus(), OrderStatus.FINISHED);
+
+        notificationSender.sendAsync(order.getUserId(), NOTIFICATION_TYPE_ORDER, BIZ_TYPE_ORDER, id,
+                "卖家已确认面交完成，订单「" + order.getProductTitle() + "」交易完成");
+        return reloadVO(id);
+    }
+
     // ================================================================ 退款
 
     @Override

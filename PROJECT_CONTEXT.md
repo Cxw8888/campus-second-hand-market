@@ -1,4 +1,5 @@
-校园二手交易平台 - 项目需求与设计文档 (AI Context 正式封版 V30)
+校园二手交易平台 - 项目需求与设计文档 (AI Context 正式封版 V31)
+V31 核心变更：补「卖家确认面交完成（已支付面交单 1→3）」路径（订单状态机 + 接口清单 + 前端按钮），补「售罄商品编辑」审核规则（关键字段变更必须重审）；3.9.6 记录 PowerShell 请求体编码踩坑（验证脚本专用）。技术设计不变，仅追加实现约定与踩坑记录。
 V30 核心变更：新增 3.9.4「事务边界与异步通知约定」（`TransactionHelper.runAfterCommit` 范式、`NotificationDispatcher` 独立 Bean 的原因、CallerRunsPolicy 的 sleep 为何不再持有行锁）、3.9.5「用户封禁缓存约定」（写完移到提交后、TTL 1 天、拦截器"缓存说封禁时以库为准"）。技术设计不变，仅追加实现约定与踩坑记录。
 V29 核心变更：新增 3.9.1「库存回补幂等约定」（封禁不回补、只在 5→4 回补、`order:restored:{orderId}` 凭证与回滚释放）、3.9.2「封禁商品状态约定」（下架 `status IN (1,2)`、回补不改状态、下单校验卖家 status、重新上架走 `relistIfSoldOut`）、3.9.3「安全响应头约定」（CSP/HSTS 的下发边界）。技术设计不变，仅追加实现约定与踩坑记录。
 V28 核心变更：新增 3.9「安全加固批约定」（6.0.1/6.0.2）：生产 fail-fast 断言范式、支付回调 HMAC 验签（含 fail-closed 与遗留金额校验）、客户端 IP 可信代理与账号计数归一化、生产关接口文档（含"knife4j.enable=false 关不掉 /doc.html"的实测坑）与 Redis 口令取舍。技术设计不变，仅追加实现约定与踩坑记录。
@@ -191,6 +192,7 @@ stateDiagram-v2
     
     已支付待发货 --> 已发货待收货 : 卖家发货(邮寄) (1→2)
     已支付待发货 --> 已完成 : 买家确认(面交) (1→3)
+    已支付待发货 --> 已完成 : 卖家确认面交完成 (1→3, V31 新增)
     已支付待发货 --> 退款申请中 : 买家申请退款 (1→6)
     
     已发货待收货 --> 已完成 : 买家确认/7天自动 (2→3)
@@ -494,6 +496,10 @@ ShedLock 配置：lockAtMostFor = PT10M。
 
 收货（面交）：SET status=3, finish_time=NOW() WHERE status=1 AND trade_type=1 AND user_id=? AND is_deleted=0（买家确认收货）
 
+卖家确认面交完成（V31 新增，1→3）：SET status=3, finish_time=NOW() WHERE status=1 AND trade_type=1 AND seller_id=? AND is_deleted=0。
+用途：买家付款后失联/临时有事时，卖家把已支付面交单推进到终态（与买家 1→3 对称，谁先确认都行）。
+接口：PUT /api/v1/order/finish-face-seller/{id}；非卖家 → 203；status≠1 或 trade_type≠1 → 209；已是 3 → 200「请勿重复操作」。
+
 面交直接完成：SET status=3, finish_time=NOW() WHERE status=0 AND trade_type=1 AND seller_id=? AND is_deleted=0
 
 说明：面交订单跳过支付步骤，由卖家确认见面交易完成。权限校验必须用 seller_id，不得使用 user_id。
@@ -675,6 +681,10 @@ InputStream 上传，try-with-resources。
 发布→3-待审核。通过 3→1，不通过 3→0 并通知卖家。修改后 0→3。
 
 编辑 status=1 (上架中) 时：关键字段（title/description/image_urls/price/condition_level）修改 → 状态重置为 3-待审核；非关键字段（trade_location/trade_type）→ 直接生效。
+
+编辑 status=2 (售罄) 时（V31 修正）：**关键字段修改 → 重置为 3-待审核**（与上架中同规则；
+修前只看库存、完全不看关键字段，导致"售罄 → 改价/改标题/换图 + 补库存 → 直接回 1-在售"，整段跳过审核 —— 自审报告 M5）；
+只改非关键字段或仅补库存 → 库存 > 0 则 1-上架中，否则保持 2-售罄。
 
 编辑 status=0 或 3：状态重置为 3-待审核。
 
@@ -912,6 +922,26 @@ TransactionHelper.runAfterCommit(() -> notificationSender.sendAsync(...));  // �
 
    ⚠️ 注意：**"以库为准"不等于放宽封禁** —— 封禁动作本身写在 DB 事务里（status=1），
    且提交后还有 version+1；被拒时的文案与版本失效路径一致。
+
+### 3.9.6 真机验证脚本的踩坑记录（6.0.5.1 · 与产品代码无关，但会让你误判）
+
+**Windows PowerShell 5.1 的 `Invoke-RestMethod -Body <string>` 默认按 ISO-8859-1 编码请求体**，
+中文会全部变成 `?`。实测：`"v605-D-售罄改标题"` 与 `"v605-D-改过的标题"` 编码后字节完全相同（`-?????`），
+于是"改了标题"在服务端看起来像"没改" —— 6.0.5.1 的 M5 场景因此**假失败**过一次（接口返回 200 但状态没重审），
+差点被误判成修复无效。
+
+**正确写法**（自建脚本里统一这样发 JSON）：
+
+```powershell
+$bytes = [System.Text.Encoding]::UTF8.GetBytes(($bodyObj | ConvertTo-Json -Compress -Depth 6))
+Invoke-RestMethod -Uri $url -Method $method -Headers $headers `
+    -ContentType 'application/json; charset=utf-8' -Body $bytes
+```
+
+另两条同类约定：
+- 脚本文件含中文时必须**存成带 BOM 的 UTF-8**（否则 PowerShell 5.1 按 GBK 读，会直接语法报错）；
+- 断言"某个按钮是否存在"时用**按钮文本集合**判断，不要对整页文本做包含判断
+  （页面里其它区域可能有同名文案，例如订单进度时间线的「卖家 / 确认面交完成」）。
 
 4. AI 扩展预留 (RAG 智能导购)
 MVP 阶段：关键词检索用 MySQL LIKE，必须匹配 title 或 description。必须参数化 CONCAT('%', #{keyword}, '%')，严禁拼接。

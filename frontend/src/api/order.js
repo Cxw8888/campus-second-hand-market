@@ -117,6 +117,20 @@ export function finishFaceOrder(orderId) {
 }
 
 /**
+ * 卖家确认面交完成（已支付面交单 1→3，仅卖家；后端用 seller_id 校验）
+ *
+ * 与买家的 receiveOrder（面交 1→3）**对称**：面交场景下谁先确认都行。
+ * 用途：买家付款后失联/临时有事时，卖家不必干等（自动收货只覆盖邮寄的 status=2），
+ * 可直接把订单推进到终态。
+ *
+ * 后端守卫：status=1 且 trade_type=1 才放行，否则 209；非卖家 203。
+ * @param {string} orderId
+ */
+export function finishFaceBySellerOrder(orderId) {
+  return request.put(`/order/finish-face-seller/${orderId}`)
+}
+
+/**
  * 买家申请退款（1/2→6）
  * @param {string} orderId
  * @param {string} reason 退款原因（必填，最长 200）
