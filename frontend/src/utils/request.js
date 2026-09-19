@@ -135,9 +135,14 @@ service.interceptors.response.use(
 
     // ② 压根没连上：后端未启动 / 被防火墙拦 / 超时
     const isTimeout = error.code === 'ECONNABORTED'
-    const msg = isTimeout
-      ? '请求超时，请稍后重试'
-      : '无法连接后端服务，请确认 http://127.0.0.1:8080 已启动'
+    // 文案分环境（批次文档修复批 · 自审 Minor 21）：
+    //   修前无视环境一律提示"请确认 http://127.0.0.1:8080 已启动" ——
+    //   生产 bundle 里带着内网地址，既向使用者暴露了拓扑、又是一句无从执行的建议。
+    //   开发环境保留这条精确提示（本机联调时最有用），生产只给通用文案。
+    const connectHint = import.meta.env.DEV
+      ? '无法连接后端服务，请确认 http://127.0.0.1:8080 已启动'
+      : '无法连接服务，请检查网络后重试'
+    const msg = isTimeout ? '请求超时，请稍后重试' : connectHint
     if (!silent) ElMessage.error(msg)
     return Promise.reject(new NetworkError(msg))
   }

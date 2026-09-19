@@ -3,6 +3,14 @@ frontend/node_modules/
 frontend/dist/
 frontend/.npm-cache/
 
+# 用户上传的图片（批次文档修复批 · 自审 Minor 20）
+# 结构：用户图落在 uploads/product/{userId}/{uuid}.jpg（LocalStorageImpl 落盘规则），
+# 而仓库根 uploads/ 下的 demo-*.png 是演示数据、必须继续跟踪 → 只忽略子目录，不忽略根文件。
+# 背景：uploads/ 此前未被忽略，用户上传的真实图片（可能含 PII）会被提交进公开仓库。
+/uploads/product/
+/uploads/tmp/
+/uploads/*.tmp
+
 # 后端
 target/
 *.class
