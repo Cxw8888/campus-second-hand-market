@@ -1,6 +1,10 @@
 # 校园二手交易平台 · 前端
 
-Vue 3 + Vite + Element Plus 构建的校园二手交易前端。第一批交付：**登录/注册、首页商品列表、商品详情、404**。
+Vue 3 + Vite + Element Plus 构建的校园二手交易前端，与后端 `PROJECT_CONTEXT.md` **V32** 对齐。
+
+当前范围：**学生端全链路**（登录/注册、首页列表、商品详情、发布/编辑/我的商品、确认订单、下单成功、
+我的订单、订单详情、个人中心、我的收藏、消息中心）+ **管理端控制台**（数据统计、商品审核、用户管理、
+订单管理、分类管理、审计日志），共 **17 个视图 / 27 条路由**；测试 **18 个文件 / 187 个用例**（`npm test` 全绿）。
 
 ---
 
@@ -27,6 +31,8 @@ npm run dev
 | `npm run dev` | 开发服务器（5173，端口被占用会直接报错而不是静默换端口） |
 | `npm run build` | 生产构建（产物在 `dist/`） |
 | `npm run preview` | 本地预览构建产物 |
+| `npm test` | 单元测试（vitest run，18 文件 / 187 用例） |
+| `npm run verify` | 构建 + 样式完整性门 + 分包门（提交前必跑，见第七节） |
 
 ---
 
@@ -35,20 +41,24 @@ npm run dev
 ```
 frontend/
 ├── index.html                     # 单页入口（内联 SVG favicon，零静态资源依赖）
-├── vite.config.js                 # 端口 / 代理 / Element Plus 按需自动引入 / SCSS 变量注入
+├── vite.config.js                 # 端口 / 代理 / Element Plus 按需自动引入 / SCSS 变量注入 / ECharts 分包
 ├── vitest.config.js               # 测试配置（jsdom + 内联 element-plus + 关闭 CSS 编译）
 ├── jsconfig.json                  # 让 IDE 认识 @ → src 别名（纯 JS 项目不做类型检查）
+├── scripts/
+│   ├── verify-styles.mjs          # 构建产物样式完整性门（函数式 API 的 CSS 是否进包）
+│   └── verify-chunks.mjs          # 构建产物分包门（ECharts 是否独立成 chunk）
 └── src/
     ├── main.js                    # 应用入口：装上 pinia → router → 挂载
     ├── App.vue                    # 应用外壳：导航栏显示策略 + 路由过渡
     ├── api/                       # 接口层（按后端模块分文件）
     │   ├── auth.js                #   登录 / 注册 / 退出 / 邮箱验证码
     │   ├── product.js             #   列表 / 详情 / 发布 / 编辑 / 下架 / 删除 / 我的商品
-    │   ├── order.js               #   防重Token / 下单 / 列表 / 详情 / 支付 / 发货 / 退款
+    │   ├── order.js               #   防重Token / 下单 / 列表 / 详情 / 支付 / 发货 / 收货 / 面交 / 退款
     │   ├── favorite.js            #   收藏 / 取消收藏 / 是否已收藏 / 我的收藏列表
     │   ├── user.js                #   个人资料 / 改密码 / 换绑邮箱
     │   ├── notification.js        #   站内信列表 / 未读数 / 标记已读
     │   ├── upload.js              #   图片上传（multipart，字段名 file）
+    │   ├── admin.js               #   管理端：审核 / 封禁 / 冻结解冻 / 强制退款 / 分类 / 审计日志 / 统计
     │   └── mock.js                #   本地兜底数据（仅接口报错时使用）
     ├── assets/styles/
     │   ├── variables.scss         # 设计变量 + mixin（被 Vite 自动注入每个 SCSS 文件）
@@ -60,24 +70,34 @@ frontend/
     │   ├── CategorySidebar.vue    # 左侧分类侧边栏
     │   ├── ConditionTag.vue       # 成色标签（绿/蓝/橙/灰四色语义）
     │   ├── EmptyState.vue         # 空状态
-    │   ├── ProductImage.vue       # 商品图（带「暂无图片」占位兜底）
+    │   ├── FavoriteCard.vue       # 收藏列表项（含已删除/已下架/已售罄三态灰化角标）
+    │   ├── NotificationItem.vue   # 站内信条目（未读圆点 + 点击已读）
+    │   ├── ProductImage.vue       # 商品图（优先缩略图，404 一次性降级到原图/占位图）
     │   ├── ProductCard.vue        # 首页商品卡片
+    │   ├── ProductStatusTag.vue   # 商品状态标签（0/1/2/3）
+    │   ├── TradeTypeTag.vue       # 交易方式标签（仅面交/仅邮寄/皆可，配色强制统一）
     │   ├── OrderCard.vue          # 订单列表卡片
     │   ├── OrderStatusTag.vue     # 订单状态标签（8 种状态配色）
     │   ├── OrderTimeline.vue      # 订单进度时间线（按面交/取消/冻结动态生成节点）
     │   ├── PayCountdown.vue       # 待支付倒计时（15 分钟，归零触发回调）
     │   ├── ProductForm.vue        # 商品表单（发布页与编辑页共用）
-    │   ├── ImageUploader.vue      # 多图上传（canvas 压缩 + 进度 + 预览 + 删除）
-    │   └── MyProductCard.vue      # 我的商品列表项（按状态给操作按钮）
-    ├── router/index.js            # 路由表 + 登录拦截守卫 + 标题同步
+    │   ├── ImageUploader.vue      # 多图上传（canvas 压缩 + 5MB 前置校验 + 进度 + 预览 + 删除）
+    │   ├── MyProductCard.vue      # 我的商品列表项（按状态给操作按钮）
+    │   └── admin/
+    │       ├── StatChart.vue      # 管理端图表容器（ECharts 按需引入）
+    │       └── statChartOptions.js # 图表 option 纯函数（可单测，ECharts 6 写法）
+    ├── router/index.js            # 路由表 + 登录拦截守卫 + 管理端角色守卫 + 标题同步
     ├── stores/
     │   ├── index.js               # pinia 实例 + 持久化插件
-    │   └── user.js                # token / userInfo / 登录登出
+    │   ├── user.js                # token / userInfo / 登录登出
+    │   ├── category.js            # 分类列表（含缓存）
+    │   └── notification.js        # 未读数轮询（30 秒）
     ├── utils/
     │   ├── request.js             # axios 封装：请求注入 Bearer、响应脱壳、401 跳登录
     │   ├── auth.js                # token 落盘（唯一出口，避免循环依赖）
-    │   ├── constants.js           # 分类/成色/交易方式/商品状态/订单状态字典 + 分页常量
+    │   ├── constants.js           # 分类/成色/交易方式/商品状态/订单状态字典 + 分页常量 + 错误码
     │   ├── format.js              # 价格/时间/图片地址/空值处理
+    │   ├── echarts.js             # ECharts 按需引入入口（core + charts + components + renderers）
     │   └── image.js               # 图片压缩（canvas，最大边长 1920 + 质量 0.8）
     └── views/
         ├── AuthView.vue                     # 登录 + 注册（/login、/register 共用）
@@ -91,13 +111,27 @@ frontend/
         ├── ProductPublishSuccessView.vue    # 发布成功
         ├── ProductMyView.vue                # 我的商品（5 状态 Tab）
         ├── ProductEditView.vue              # 编辑商品（含归属校验）
+        ├── FavoriteListView.vue             # 我的收藏（保留失效商品并标注）
+        ├── NotificationListView.vue         # 消息中心
         ├── UserProfileView.vue              # 个人中心
         ├── ForbiddenView.vue                # 403
-        ├── PlaceholderView.vue              # 第四批页面的占位
+        ├── PlaceholderView.vue              # 预留占位页（当前无路由使用）
         ├── NotFoundView.vue                 # 404
-        └── __tests__/                       # vitest 用例（详见第七节）
+        ├── admin/                           # 管理端（AdminLayout + 6 个页面）
+        │   ├── AdminLayout.vue              #   管理端外壳（侧边菜单 + 权限守卫落地页 = 数据统计）
+        │   ├── AdminDashboardView.vue       #   数据统计（概览卡片 + 趋势 7/30 天 + 分布图 + 热门榜）
+        │   ├── AdminProductAuditView.vue    #   商品审核
+        │   ├── AdminUserView.vue            #   用户管理（封禁/解封）
+        │   ├── AdminOrderView.vue           #   订单管理（冻结/解冻/强制退款）
+        │   ├── AdminCategoryView.vue        #   分类管理（含迁移）
+        │   └── AdminAuditLogView.vue        #   审计日志
+        └── __tests__/                       # vitest 用例（详见第七节；本目录共 11 个用例文件）
             ├── OrderCreateView.spec.js
-            └── ProductPublishView.spec.js
+            ├── OrderDetailView.spec.js
+            ├── ProductPublishView.spec.js
+            ├── FavoriteListView.spec.js
+            ├── NotificationListView.spec.js
+            └── Admin*.spec.js               # 6 个管理端页面用例
 ```
 
 ---
@@ -123,16 +157,17 @@ frontend/
 - 失败时统一 `ElMessage` 提示 + reject 一个 `BizError`；需要自己处理的调用方传 `{ silent: true }`
 - HTTP 401 → 清 token + 清 Pinia + 跳 `/login`（带 `redirect` 回跳）
 
-### 3. 商品图片目前全部会 404
+### 3. 商品图片（演示图与缩略图）
 
-后端 `uploads/` 目录是空的，seed 数据里的 `/static/uploads/demo*.jpg` 并不存在。
-所以：
+后端 `uploads/` 目录里跟踪了 **17 张 `demo-*.png` 演示图**（`/static/uploads/...` 可访问），
+但**用户真实上传的图片不在仓库里**（`.gitignore` 已忽略 `/uploads/product/`，见仓库根 `.gitignore`）。所以：
 
 - `vite.config.js` 里把 `/static` 也代理到 8080（否则相对路径会打到 5173）
-- `ProductImage.vue` 用 `@error` 统一降级成「浅绿渐变 + 暂无图片」占位图
-- 列表页因此**不会有碎图**，观感上像是刻意设计的空态
+- 列表页优先用后端返回的 `thumbUrl`（400×400 缩略图），没有缩略图时退回原图
+- `ProductImage.vue` 的 `fallbackSrc` 做一次性降级：缩略图 404 → 原图 → 「浅绿渐变 + 暂无图片」占位图，
+  因此**不会有碎图**，观感上像是刻意设计的空态
 
-想换成真图，把图片放到后端 `uploads/` 目录即可，前端无需改动。
+想换成真图，把图片放到后端 `uploads/` 目录（或走上传接口）即可，前端无需改动。
 
 ### 4. 邮箱验证码在降级模式下会直接返回
 
@@ -214,10 +249,22 @@ Element Plus 的主题不是用 SCSS 编译改的，而是在 `index.scss` 里�
 - `/user/profile`：快捷入口（收藏 / 消息 / 订单，带角标）、资料与头像、修改密码、换绑邮箱
 - `/403`：无权限页（与 404 区分开）
 
-**占位（第四批）**
+**第四批：收藏 / 消息 / 个人中心接通**
 
-- `/favorite/list` 我的收藏列表、`/notification/list` 消息中心
-  （后端接口已就绪，收藏写入与未读数角标都已经接通，只差列表页）
+- `/favorite/list` 我的收藏：**不过滤失效商品**，按已删除 / 已下架 / 已售罄三态灰化 + 角标 + 禁用下单，
+  顶部给出「本页有 N 件已失效」的清理提示
+- `/notification/list` 消息中心：列表 + 未读圆点 + 单条/全部已读；导航栏未读数 30 秒轮询
+- `/user/profile` 快捷入口（收藏 / 消息 / 订单，带角标）与资料、改密、换绑邮箱
+
+**第五批 / 5.5：管理端控制台**
+
+- `/admin`（`AdminLayout`）：侧边菜单 + 角色守卫，**落地页 = 数据统计**
+  （概览 8 个数字、趋势 7/30 天切换、订单状态与分类分布、热门商品榜，ECharts 按需引入并独立分包）
+- 商品审核（3→1 / 3→0）、用户管理（封禁 / 解封）、订单管理（冻结 / 解冻 CANCEL|COMPLETE / 强制退款）、
+  分类管理（增删改 + 商品迁移）、审计日志（操作类型 + 时间区间筛选）
+
+**6.0.x 前端配套**：订单详情页给卖家加「确认面交完成」按钮（已支付面交单 1→3，与买家确认收货对称）；
+商品列表用 `thumbUrl` 缩略图；`ProductImage` 一次性降级；样式与分包门禁（`verify:styles` / `verify:chunks`）。
 
 ---
 
@@ -230,18 +277,22 @@ cd frontend
 npm install         # 首次会装上 vitest / @vue/test-utils / jsdom
 npm test            # 跑一遍全部用例（等价于 vitest run）
 npm run test:watch  # 开发时监听改动自动重跑
-npm run verify      # 先 build，再检查构建产物的样式完整性（见下）
+npm run verify      # 先 build，再依次跑 verify:styles + verify:chunks（推荐）
 npm run verify:styles  # 只跑样式检查（要求 dist 已存在）
+npm run verify:chunks  # 只跑分包检查：ECharts 是否独立成 chunk、主包是否干净
 ```
 
 ### 测什么
 
-| 文件 | 覆盖内容 |
-| --- | --- |
-| `src/views/__tests__/OrderCreateView.spec.js` | 下单页防连点：连点 5 次只弹 1 个确认框；确认后只发 1 次请求；202 时提示并刷新防重 Token |
-| `src/views/__tests__/ProductPublishView.spec.js` | 发布页防连点：连点 5 次只发 1 次请求；校验失败也解锁；面交地点随交易方式联动校验 |
+当前 **18 个用例文件 / 187 个用例**，`npm test` 全绿。分布：
 
-当前共 **6 个用例**，`npm test` 全绿。
+| 目录 | 覆盖内容 |
+| --- | --- |
+| `src/views/__tests__/`（11 个） | 下单页与订单详情的防连点 / 状态×角色按钮可见性；发布页表单联动与校验；收藏列表的失效标注；消息中心已读；6 个管理端页面（审核、用户、订单、分类、审计日志、数据统计）的交互与错误态 |
+| `src/components/__tests__/` + `components/admin/__tests__/` | `ProductForm`（分类数据源兜底、分类失效提示、编辑页回填）、`CategorySidebar`、`ProductImage`（缩略图 → 原图 → 占位图降级）、`statChartOptions`（ECharts 6 option 纯函数，含 `outerBoundsMode` 断言） |
+| `src/api/__tests__/` | 管理端接口层与后端契约逐条对齐（路径 / 参数位置 / 错误码） |
+| `src/router/__tests__/` | 管理端路由守卫：`/admin` 落地页与 role 校验、未登录/非管理员的跳转 |
+| `src/stores/__tests__/` | 分类 store 的缓存与刷新 |
 
 ### 为什么专门测「连点」
 

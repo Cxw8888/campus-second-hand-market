@@ -102,6 +102,8 @@ src/
   - `tradeType=2`（仅邮寄）→ 下单页只显示「收货地址」；面交地点**隐藏**
   - `tradeType=3`（皆可）→ Radio 让用户二选一，选中后显示对应字段
 - **面交直接完成**：卖家可调 `PUT /order/finish-face/{orderId}` 让面交订单直接从 `status=0 → 3`（跳过支付/发货），前端要在**卖家视角**的待支付面交订单上提供这个按钮
+- **卖家确认面交收款（6.0.5.1 · M2）**：**已支付**的面交单（`trade_type=1` 且 `status=1`）由卖家调 `PUT /order/finish-face-seller/{orderId}` 完成 `1 → 3`（与买家「确认收货」1→3 对称）——现实中是"卖家收到钱、当面交货"，所以卖家视角的已支付面交单必须有这个按钮；非卖家 203、状态不对 209
+  - ⚠️ 两个接口名字很像，**不要混**：`finish-face` = 待支付**直接完成 0→3**，`finish-face-seller` = 已支付**卖家确认收款 1→3**
 - **发货接口限制**：`PUT /order/ship/{orderId}` 只支持 `trade_type IN (2,3)`，面交订单调用必然返回 209 → 前端对面交订单**隐藏发货按钮**
 - **面交订单状态流转**：`0 → 1 → 3`（无 2），或 `0 → 3`（直接完成）；不要按邮寄的 `0→1→2→3` 展示时间线
 - **面交地点字段**：后端 `tb_order` 只有 `address` 一个自由文本字段，面交时把"约定地点"写进 `address`；详情页按 `tradeType` 决定展示成「面交地点」还是「收货地址」
@@ -122,6 +124,24 @@ src/
 - `force-refund` 的 `reason` 是 query 参数（`request.put(url, null, { params })`）
 - 订单号是**精确匹配**，UI 上写"订单号精确查询"而不是"搜索"
 
+## 11. 商品搜索有 60 秒缓存 + 500ms 熔断（5.4.4）
+`search.cache.enabled` 开启时搜索结果缓存 60 秒（带最多 10 秒随机抖动），`search.circuit-breaker` 在连续超时后直查 DB / 降级 LIKE。
+→ **刚发布、刚改价、刚审核通过的商品最多 60 秒内可能搜不到**：前端不要把它当成"搜索失败"做兜底提示，也不要自己做本地缓存/排序补偿（会与后端不一致）；列表页的"我的商品"入口走的是另一条不带搜索缓存的查询，不适用本条。
+
+## 12. 上传加固（6.0.5.2 · M6）
+后端按顺序做：**先读文件头拿真实图片格式与尺寸**（不看扩展名、不直接解码整图，防解压炸弹）→ 单边 ≤ 8192px、总像素 ≤ 5000 万 → 单用户配额（`app.storage.max-files-per-user` 默认 100 张、`app.storage.max-total-size-mb-per-user` 默认 50MB）→ 落地成 `{uuid}.jpg` + 400×400 缩略图。
+→ 超限一律 `code=100`，文案见 `LocalStorageImpl`（"图片大小不能超过5MB" / "图片最大边长不能超过8192px" / "图片总像素不能超过5000万" / 配额类）。前端必须**前置校验并把后端口径原样告知用户**（单文件 5MB，`ImageUploader` 已做 canvas 压缩 + 5MB 校验）；配额类失败不要提示成"网络错误"。
+→ 格式白名单声明为 jpg/jpeg/png/webp，但**实际只有 jpg/jpeg/png 能过**：JDK 的 `ImageIO.getImageReaders` 不支持 WebP，webp 会以"不支持的图片格式"（code=100）被拒 —— 前端选择器不要承诺支持 webp。
+→ 换图/换头像时后端会删除旧文件（含缩略图）并退还配额，前端不要复用旧 URL 做"回滚已上传图片"。
+
+## 13. 售罄商品编辑后要重新审核（6.0.5.1 · M5）
+`status=2`（已售出/售罄）的商品编辑**关键字段**后会被打回 `status=3`（待审核），不再直接保留售罄态。
+→ 编辑成功后不能假设"还是售罄"，要按返回的 `status` 渲染，并提示"修改后需重新审核通过才会展示"。
+
+## 14. 生产环境有 CSP，前端不能引外部资源（6.0.3 · M7）
+prod 下 `SecurityHeadersFilter` 下发 `Content-Security-Policy: default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; object-src 'none'; frame-ancestors 'none'; base-uri 'self'`，另有 `X-Frame-Options: DENY`、`X-Content-Type-Options: nosniff`、`Referrer-Policy: strict-origin-when-cross-origin`（dev 不下发 CSP，否则 knife4j 打不开）。
+→ 前端因此**不能**引用外部 CDN 的字体/脚本/图片，也**不能**直连第三方接口（`connect-src 'self'`，所有请求都要走 `/api` 代理或同源后端）；图片只允许同源与 `data:`（Element Plus 的 data URI 图标因此可用）。改这些约定等于改生产可用性，属于架构级决策，必须先问用户。
+
 ---
 
 # 编码约定
@@ -140,6 +160,16 @@ src/
   - `tradeType=1` → 显示且必填
   - `tradeType=2` → 隐藏且清空
   - `tradeType=3` → 显示但可空
+
+## 图表（ECharts 6.1，管理端）
+- **必须按需引入**：`import * as echarts from 'echarts/core'` + 显式 `echarts.use([...])`，统一入口 `src/utils/echarts.js`；
+  **禁止** `import * as echarts from 'echarts'`（全量引入会让独立 chunk 失效，`verify:chunks` 会拦下）
+- **不要写 `containLabel: true`**：ECharts 6 已不再使用该写法，等价配置是 `grid: { outerBoundsMode: 'same' }`
+  （官方口径：`containLabel:true` ≡ `{outerBoundsMode:'same', outerBoundsContain:'axisLabel'}`）；
+  本项目 `components/admin/statChartOptions.js` 已统一为 v6 写法，并有单测断言 `option.grid.outerBoundsMode === 'same'`，新图表照抄
+- 新增 echarts 顶层入口（如 `echarts/features` 里的 LabelLayout / UniversalTransition）**必须同步加进**
+  `vite.config.js` 的 `manualChunks.echarts` 数组，否则那部分代码会漏回业务 chunk；新增图表类型（LineChart 等）不用改，它们都在 `echarts/charts` 里
+- 图表 option 抽成**纯函数**（如 `statChartOptions.js`）便于单测与三处复用，不要在 `.vue` 里直接拼 option
 
 ## 路由
 - 所有路由在 `src/router/index.js` 集中定义，用 `name` 命名
@@ -246,6 +276,11 @@ flag，裸 javac 不带。
 | 精度陷阱 | `grep -rn 'Number(' src/` + `grep -rn 'parseInt(' src/` + `grep -rn 'price.*/.*100' src/` | 见下方精度说明 |
 | 路由一致性 | 扫描所有 `router.push` / `router.replace` 的 name | 与 router/index.js 定义完全匹配，参数齐全 |
 | 登录拦截 | 检查所有 requiresAuth 路由 | 私有路由无遗漏，公开路由无误标 |
+| **分包完整性** | `npm run verify:chunks` | exit=0：`dist/assets/echarts-*.js` 存在且体积在阈值内，业务 chunk 里不含 zrender 特征串（5.5.3 新增） |
+
+> 后端侧对应门禁：`javac -parameters` 全量编译 + JUnit Platform 跑全量用例（当前 42 个测试类 / 222 个用例）。
+> 纯 Mockito 单测涉及 `select(...)` / `set(...)` 这类**立即翻译列名**的 lambda 时必须 `TableInfoHelper.initTableInfo(...)`；
+> 自定义 SQL（`@Select` / `@Update`）改动**必须**在真库上跑一次场景验证——6.0.2 曾出现单测（Mapper 被 mock）全绿、真机 MySQL 语法报错的情况。
 
 **精度说明**：grep 命中需人工复核——`Number(page)` / `Number(size)` 是合法的，只有 `Number(id)` / `Number(orderNo)` / `Number(userId)` 才违规；`price / 100` 只有出现在模板表达式中才违规，注释里无所谓。
 
@@ -258,6 +293,30 @@ flag，裸 javac 不带。
 - 删除临时脚本、dist/、npm 缓存
 - 报告 src/ 文件总数
 - 建议 git commit：`feat(frontend): batch-N 描述`，后续批次出问题可 git revert 回滚
+- **提交前必须走一遍「每批文档同步检查」（见下一节）**，文档不同步也算本批未完成
+
+---
+
+# 每批文档同步检查（收尾必做）
+
+文档债务的根因不是"没人写文档"，而是**改了代码没同步文档**。所以每批收尾按下表逐项对照，
+"改了 → 文档必须改"，改完在报告「一、文件清单」里列出文档改动；**没有对应改动就明确写「无需修改」**，
+不要为了改而改。
+
+| 本批改了什么 | 必须同步的文档 | 具体动作 |
+| :--- | :--- | :--- |
+| 新增/删除/修改接口（路径、方法、参数、字段、响应结构） | `docs/API_INTERFACE_SPEC.md` | 更新对应小节；顺带补 `api-tests.http` 用例 |
+| 错误码语义变化或新增错误码 | `docs/API_INTERFACE_SPEC.md` + `PROJECT_CONTEXT.md` 第 5 章 + `frontend/src/utils/constants.js` | 三处口径必须逐字一致（错误码表是封版内容，**不引入 404**） |
+| 状态机流转变化 | `PROJECT_CONTEXT.md` 第 4/6 章 + 本文「后端硬约束」 | 流转表、触发方、幂等与库存联动一起写清 |
+| 新增/修改配置项、环境变量、启动方式 | `README.md`（§二）+ `PROJECT_CONTEXT.md` | 环境变量表补行；无环境变量绑定的配置项要注明"写在 yml 里" |
+| 新增依赖 / 升级框架版本 | `README.md`（技术栈表）+ `PROJECT_CONTEXT.md` | 版本号同步（禁止擅自新增依赖） |
+| 新的安全策略（鉴权、验签、限流、响应头、上传限制） | `README.md` §四安全表 + `PROJECT_CONTEXT.md` 3.9.x | 写清"默认值 = 最安全的那一侧"与降级行为 |
+| 出现新的可复用约定或踩坑 | `SYSTEM_PROMPT.md` | 追加约定条目，附上错误现象与证据 |
+| 每批结束（无论改了什么） | `PROJECT_CONTEXT.md` 头部 + `系统测试.txt` + `docs/自审报告-2026-09-19.md` | ① 头部追加本版变更行；② `系统测试.txt` **只追加**一段本批真机验证记录（不改历史段落）；③ 自审报告里已修条目统一改成 `已修复（批次号）`，未修的保持原状 |
+| 报告骨架需要调整 | `BATCH_TEMPLATE.md` | 仅当六节结构本身变化时改，否则「无需修改」 |
+
+**版本号口径**：`PROJECT_CONTEXT.md` 头部的最新版本号 = 项目当前版本（如 V32），
+`README.md` 标题与 `docs/API_INTERFACE_SPEC.md` 标题必须与之一致；改版本时三处一起改。
 
 ---
 

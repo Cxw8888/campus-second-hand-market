@@ -1,4 +1,4 @@
-# 校园二手交易平台 · 接口清单（V26 封版对齐）
+# 校园二手交易平台 · 接口清单（V32 封版对齐）
 
 > 统一前缀：`/api/v1/`
 > 统一响应体：`Result<T> { code:int, msg:String, data:T }`
@@ -87,15 +87,14 @@
 
 | # | 方法 | 路径 | 语义 | 请求 | 响应 |
 | :-- | :--- | :--- | :--- | :--- | :--- |
-| 3.1 | GET | `/api/v1/product/list` | **可选认证** | `keyword?` `categoryId?` `minPrice?` `maxPrice?` `conditionLevel?` `tradeType?` `sortBy?`(price/ create_time) `order?`(asc/desc) `page` `size` | `data`: 分页 `ProductListVO`；Stream 转 VO 并剔除卖家 `phone`/`email`；`is_deleted=0` 且 `status=1`（本人/管理员可见性提升见 3.3） |
+| 3.1 | GET | `/api/v1/product/list` | **可选认证** | `keyword?` `categoryId?` `minPrice?` `maxPrice?` `conditionLevel?` `tradeType?` `sortBy?`(price/ create_time) `order?`(asc/desc) `page` `size` | `data`: 分页 `ProductListVO`（含 `coverImage` 与 **`thumbUrl`**）；Stream 转 VO 并剔除卖家 `phone`/`email`；`is_deleted=0` 且 `status=1`（本人/管理员可见性提升见 3.2）。**检索行为（批次 5.4.4）**：关键字含 CJK 且长度 ≥ 2 → `MATCH…AGAINST`（ngram，按相关度优先）；纯 ASCII 关键字或单字 → LIKE（参数化 `CONCAT('%',#{keyword},'%')`）；无关键字 → 仍走 MyBatis-Plus 分页且**不缓存不熔断**；FULLTEXT 抛异常 → 自动降级 LIKE（仅 warn）。**结果缓存 60 秒 + 0~10 秒抖动，空结果也缓存**（无主动失效，靠 TTL）；**500ms 超时熔断**（连续 5 次超时 → 开闸 30 秒，期间返回空列表，响应结构不变） |
 | 3.2 | GET | `/api/v1/product/detail/{id}` | **可选认证** | - | `data`: `ProductDetailVO`；可见性：游客 `status=1`；登录非卖家/非管理员 `status IN (0,1,2)`；卖家本人全部状态；管理员全部状态；否则 204 |
 | 3.3 | POST | `/api/v1/product` | 强制认证 | body: `categoryId` `title` `description` `price` `stock` `conditionLevel` `tradeType` `tradeLocation?` `imageUrls[]`(1-9) | `data`: `{id}`；落库 `status=3` 待审核；校验 title 1-100、price>0、condition_level 1-4 |
-| 3.4 | PUT | `/api/v1/product/{id}` | 强制认证 | body 同上（全量更新语义） | `data`: null；关键字段变更 → `status=3`；`status=2` 且新库存>0 → `status=1` |
-| 3.5 | DELETE | `/api/v1/product/{id}` | 强制认证 | - | `data`: null；存在未完成订单(0/1/2/6/7) → 207 |
+| 3.4 | PUT | `/api/v1/product/{id}` | 强制认证 | body 同上（全量更新语义） | `data`: null；**关键字段**（title/description/imageUrls/price/conditionLevel）变更 → `status=3`；`status=2-售罄` 时：关键字段变更同样 → `3`（批次 6.0.5.1 · M5，修前会直接回到 1-在售、跳过审核），否则按库存 `>0 → 1` / 否则 `2`；`status=0/3` → `3`；换图时**自动清理被替换掉的旧图文件**（批次 6.0.5.2 · M6-A3） |
+| 3.5 | DELETE | `/api/v1/product/{id}` | 强制认证 | - | `data`: null；存在未完成订单(0/1/2/6/7) → 207；逻辑删除后**同步清理该商品的图片文件**（原图 + 缩略图，被其它商品引用的不删；批次 6.0.5.2 · M6-A3） |
 | 3.6 | GET | `/api/v1/product/my` | 强制认证 | `status?` `page` `size` | `data`: 分页 `ProductListVO`（含待审核） |
 | 3.7 | PUT | `/api/v1/product/off-shelf/{id}` | 强制认证 | - | `data`: null；卖家下架自己的商品（`status=1→0`） |
-| 3.8 | POST | `/api/v1/upload/image` | 强制认证 | `multipart/form-data`: `file` | `data`: `{url}`；≤5MB、魔数校验、白名单 jpg/jpeg/png/webp、最大边长 8192px、总像素 ≤5000 万；UUID 重命名 `product/{userId}/{uuid}.jpg` |
-| 3.9 | GET | `/api/v1/product/favorite/list` | 强制认证 | `page` `size` | 见 5. 收藏 |
+| 3.8 | POST | `/api/v1/upload/image` | 强制认证 | `multipart/form-data`: `file` | `data`: `{url}`；校验链：≤5MB → 扩展名/Content-Type 白名单 → **魔数** → **先读图片头校验尺寸**（最大边长 8192px、总像素 ≤5000 万；批次 6.0.5.2 · M6-A1，修前先全量解码再校验 → 解压炸弹可 OOM）→ **上传配额**（`app.storage.max-files-per-user` 默认 100 张 / `max-total-size-mb-per-user` 默认 50MB，任一超限 `code=100「上传配额已满」`，Redis 计数，批次 6.0.5.2 · M6-A2）→ 落盘 `product/{userId}/{uuid}.jpg` + 400px 缩略图 `{uuid}_thumb.jpg`。※ JDK 自带 ImageIO **无 WebP 解码器**，白名单里的 webp 事实上传不进来（返回「不支持的图片格式」） |
 
 ## 4. 订单 `/api/v1/order`
 
@@ -154,6 +153,22 @@
 | 7.9 | PUT | `/api/v1/admin/order/force-refund/{id}` | 强制认证 + ROLE_ADMIN | `reason?` | `6/7→4` + **库存回补**；`REFUND_ORDER` |
 | 7.10 | GET | `/api/v1/admin/audit-log/list` | 强制认证 + ROLE_ADMIN | `operatorId?` `operationType?` `startTime?` `endTime?` `page` `size` | `data`: 分页 `AuditLogVO` |
 
+### 7.11~7.15 管理端数据统计 `/api/v1/admin/stats`（批次 5.5.1 / 5.5.2 新增，独立 Controller）
+
+> 类级 `@RequireRole(1)`（与 7.1~7.10 同一写法，严禁 `@PreAuthorize`）；普通用户 → `code=403`，未登录 → HTTP 401。
+> **五个接口全部只读**：无事务、无分布式锁、**不写审计日志**（审计记录的是"管理动作"，看统计不是动作）。
+> 结果缓存 60 秒（`RedisKeys.ADMIN_STATS_PREFIX`，刻意与 `search:` 前缀分开）；
+> `days` 白名单 **7\|30**、`limit` 白名单 **1~20**，越界 → `code=100`（白名单校验在 Service）。
+> 日期口径为 **GMT+8 当天 00:00:00** 起；日期缺口补 0，数组长度恒等于 `days`。
+
+| # | 方法 | 路径 | 语义 | 请求 | 响应 |
+| :-- | :--- | :--- | :--- | :--- | :--- |
+| 7.11 | GET | `/api/v1/admin/stats/overview` | 强制认证 + ROLE_ADMIN | - | `data`: `AdminOverviewVO`（8 个数字一次返回：用户/商品/订单的总数与今日新增 + GMV 累计与今日，避免前端发 8 个请求） |
+| 7.12 | GET | `/api/v1/admin/stats/order-status` | 强制认证 + ROLE_ADMIN | - | `data`: `List<AdminOrderStatusVO>`；**恒定 8 条**（status 0~7 全量补齐，无数据 count=0）；**不含 label**，文案由前端 `constants.js` 提供 |
+| 7.13 | GET | `/api/v1/admin/stats/product-category` | 强制认证 + ROLE_ADMIN | - | `data`: `List<AdminProductCategoryVO>`；以分类为主表，**空分类 count=0 也返回**；分类已逻辑删除的"孤儿商品"汇总为 `categoryId` 缺失的最后一条 |
+| 7.14 | GET | `/api/v1/admin/stats/trend` | 强制认证 + ROLE_ADMIN | `days?`（默认 7，白名单 7\|30） | `data`: `AdminTrendVO`；同一时间轴上的三条序列（每日订单量 / 每日商品发布 / 每日用户注册），长度恒等于 `days` |
+| 7.15 | GET | `/api/v1/admin/stats/hot-products` | 强制认证 + ROLE_ADMIN | `days?`（默认 7）`limit?`（默认 10，白名单 1~20） | `data`: `AdminHotProductVO`；按窗口内订单数降序取前 `limit` 个；标题取订单快照中最新一单，**商品已删除也能上榜**（分类名为 null 时前端显示「—」） |
+
 ## 8. AI 扩展预留 `/api/v1/ai`
 
 | # | 方法 | 路径 | 语义 | 请求 | 响应 |
@@ -166,7 +181,19 @@
 | :--- | :--- | :--- |
 | GET | `/actuator/health` | 默认启用 |
 | GET | `/actuator/prometheus` | **可选实现**（默认不引入 micrometer-registry-prometheus） |
-| GET | `/swagger-ui/**`、`/v3/api-docs/**` | SpringDoc / knife4j |
+| GET | `/actuator/info` | 在完全公开路径集合内（见第 10 章），但当前未暴露（`management.endpoints.web.exposure.include=health`） |
+| GET | `/swagger-ui.html`、`/swagger-ui/**`、`/v3/api-docs`、`/v3/api-docs/**`、`/doc.html`、`/webjars/**` | SpringDoc / knife4j 接口文档（**仅非 prod**，见下方说明） |
+| GET | `/static/**` | 上传文件的静态映射（`app.storage.local.url-prefix`，默认 `/static/uploads`） |
+| - | `/favicon.ico`、`/error` | 浏览器请求与容器错误页所需 |
+
+> **prod 下接口文档路径被封禁（批次 6.0.2 · M7-a）**：`PublicPathResolver` 在 prod 会摘除
+> `DOC_PATHS`（`/doc.html`、`/swagger-ui/**`、`/v3/api-docs/**`、`/webjars/**`），再由
+> `ApiDocGuardInterceptor` 把它们变成"接口不存在"：响应为 **HTTP 200 + `code=100`「请求的接口不存在: {url}」**，
+> 与"随便访问一个不存在的路径"完全同构（本项目错误码表**没有 404**，见 0.1）。
+> 只靠 `knife4j.enable=false` 关不掉 `/doc.html`（它是 knife4j jar 内 `META-INF/resources/doc.html`
+> 的静态资源，实测结论），故必须叠加本拦截器。
+> 另有安全响应头（`SecurityHeadersFilter`）：全环境下发 `X-Content-Type-Options` / `X-Frame-Options` /
+> `Referrer-Policy` / `Permissions-Policy`，**prod** 额外下发 CSP，HSTS 仅在 prod 且请求本身为 HTTPS 时下发。
 
 ---
 
@@ -174,7 +201,7 @@
 
 | 类别 | 路径 | 行为 |
 | :--- | :--- | :--- |
-| ① 完全公开 | `/actuator/health`、`/actuator/prometheus`、`/swagger-ui/**`、`/v3/api-docs/**`（+ 静态资源 `/favicon.ico`、`/error`） | **直接 `return true`**，不解析 Token，不写 `UserContext` |
+| ① 完全公开 | `/actuator/health`、`/actuator/prometheus`、`/actuator/info`、`/swagger-ui.html`、`/swagger-ui/**`、`/v3/api-docs`、`/v3/api-docs/**`、`/doc.html`、`/webjars/**`、`/favicon.ico`、`/error`、`/static/**` | **直接 `return true`**，不解析 Token，不写 `UserContext`（prod 会先摘除 `DOC_PATHS`，见第 9 章） |
 | ② 可选认证 | `/api/v1/product/detail/**`、`/api/v1/product/list`、`/api/v1/category/list`（+ `/api/v1/ai/search`） | 尝试解析 Token：存在且有效 → 注入 `UserContext`；不存在/无效/过期 → **静默放行**（不报错、不 401） |
 | ③ 强制认证 | 其余全部 `/api/v1/**` | 必须携带有效 Token，否则 `throw BusinessException(401)` → HTTP 401（文案分两类，见下方） |
 

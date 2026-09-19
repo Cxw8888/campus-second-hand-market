@@ -1,6 +1,6 @@
 ###############################################################################
 #  校园二手交易平台 · 端到端验收脚本
-#  对应 PROJECT_CONTEXT.md (V26) 第 6 章「验收标准与关键接口测试用例」
+#  对应 PROJECT_CONTEXT.md (V32) 第 6 章「验收标准与关键接口测试用例」
 #
 #  文件位置：项目根目录  C:\Users\chen\Desktop\rwuru\api-tests.http
 #  IDEA 中打开：双击文件 → 右上角选择运行环境 → 逐条点请求左侧的 ▶
@@ -1885,6 +1885,129 @@ Authorization: Bearer {{buyer_token}}
 %}
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# 4.33 卖家确认面交完成（批次 6.0.5.1 · M2，/order/finish-face-seller/{id}）
+#   背景：面交单买家支付后（status=1）此前**没有任何终态路径** —— 买家失联时卖家无接口可推进。
+#   本批补上"卖家确认收款交货"：已支付面交单 1→3（与买家 receive 的 1→3 对称）。
+#   守卫：status=1 且 trade_type=1 且 seller_id=当前用户，否则 203（非卖家）/ 209（状态或类型不对）；
+#        已是 3-已完成 → 200 +「请勿重复操作」。
+#   本组用例自带商品（不复用 p_face 的库存），避免依赖其它用例的副作用。
+# ─────────────────────────────────────────────────────────────────────────────
+
+### 4.33-0a 【前置】卖家发布面交专用商品 p_fs
+POST {{base}}/product
+Authorization: Bearer {{seller_token}}
+Content-Type: application/json
+
+{
+  "categoryId": 2,
+  "title": "卖家确认面交专用商品",
+  "description": "仅供 finish-face-seller 用例使用，库存自给自足",
+  "price": 66.00,
+  "stock": 2,
+  "conditionLevel": 2,
+  "tradeType": 1,
+  "tradeLocation": "图书馆一楼大厅",
+  "imageUrls": ["/static/uploads/demo3.jpg"]
+}
+
+> {%
+    client.global.set("p_fs", response.body.data ? response.body.data.id : "");
+    client.test("4.33-0a 面交专用商品已发布（status=3 待审核）", function () {
+        client.assert(response.body.code === 200, "code 应为 200，实际 " + response.body.code + " / " + response.body.msg);
+        client.assert(!!response.body.data.id, "应返回商品 id");
+    });
+%}
+
+
+### 4.33-0b 【前置】管理员审核通过 p_fs（3→1）
+PUT {{base}}/admin/product/audit/{{p_fs}}
+Authorization: Bearer {{admin_token}}
+Content-Type: application/json
+
+{
+  "pass": true,
+  "reason": "验收通过"
+}
+
+
+### 4.33a 取防重 Token（买家）
+GET {{base}}/order/token
+Authorization: Bearer {{buyer_token}}
+
+> {% client.global.set("ot_fs", response.body.data ? response.body.data.token : ""); %}
+
+
+### 4.33b 下单构造面交订单 o10（status=0, trade_type=1）
+POST {{base}}/order
+Authorization: Bearer {{buyer_token}}
+X-Order-Token: {{ot_fs}}
+Content-Type: application/json
+
+{
+  "productId": {{p_fs}},
+  "quantity": 1,
+  "address": "图书馆一楼大厅"
+}
+
+> {%
+    client.global.set("o10", response.body.data ? response.body.data.id : "");
+    client.test("4.33b 面交下单成功（status=0）", function () {
+        client.assert(response.body.code === 200, "code 应为 200，实际 " + response.body.code + " / " + response.body.msg);
+        client.assert(response.body.data.status === 0, "status 应为 0，实际 " + response.body.data.status);
+        client.assert(response.body.data.tradeType === 1, "tradeType 应为 1（仅面交），实际 " + response.body.data.tradeType);
+    });
+%}
+
+
+### 4.33c 买家支付 o10（0→1）
+PUT {{base}}/order/pay/{{o10}}
+Authorization: Bearer {{buyer_token}}
+
+> {%
+    client.test("4.33c 支付成功（status=1）", function () {
+        client.assert(response.body.code === 200, "code 应为 200，实际 " + response.body.code + " / " + response.body.msg);
+        client.assert(response.body.data.status === 1, "status 应为 1，实际 " + response.body.data.status);
+    });
+%}
+
+
+### 4.33d ★越权：买家调用 finish-face-seller → 期望 code=203
+PUT {{base}}/order/finish-face-seller/{{o10}}
+Authorization: Bearer {{buyer_token}}
+
+> {%
+    client.test("4.33d 买家调用卖家接口 → code=203", function () {
+        client.assert(response.body.code === 203, "code 应为 203，实际 " + response.body.code + " / " + response.body.msg);
+        client.assert(response.body.msg === "无权操作该订单", "msg 不符，实际 " + response.body.msg);
+    });
+%}
+
+
+### 4.33e ★卖家确认面交完成（1→3）
+PUT {{base}}/order/finish-face-seller/{{o10}}
+Authorization: Bearer {{seller_token}}
+
+> {%
+    client.test("4.33e 卖家确认面交完成 → status=3", function () {
+        client.assert(response.body.code === 200, "code 应为 200，实际 " + response.body.code + " / " + response.body.msg);
+        client.assert(response.body.data.status === 3, "status 应为 3，实际 " + response.body.data.status);
+    });
+%}
+
+
+### 4.33f 重复调用 → 期望 200 +「请勿重复操作」（幂等约定，不是错误码）
+PUT {{base}}/order/finish-face-seller/{{o10}}
+Authorization: Bearer {{seller_token}}
+
+> {%
+    client.test("4.33f 重复确认 → 200 且 msg=请勿重复操作", function () {
+        client.assert(response.body.code === 200, "code 应为 200，实际 " + response.body.code);
+        client.assert(response.body.msg === "请勿重复操作", "msg 不符，实际 " + response.body.msg);
+    });
+%}
+
+
 ###############################################################################
 # §5  站内信（异步线程池 + 消费端接口 + 归属校验）
 ###############################################################################
@@ -2303,6 +2426,130 @@ Authorization: Bearer {{buyer_token}}
 > {%
     client.test("6.17 收藏列表不过滤已下架商品", function () {
         client.assert(response.body.code === 200, "code 应为 200，实际 " + response.body.code);
+    });
+%}
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 6.18~6.23 管理端数据统计（批次 5.5.1 概览/分布 + 5.5.2 趋势/热门榜）
+#   五个接口全部只读：结果缓存 60 秒、不写审计日志；
+#   带参接口的 days 白名单 7|30、limit 白名单 1~20，越界一律 code=100。
+#   ⚠️ 概览里的"今日"按 GMT+8 当天 00:00:00 起算；GMV 为 BigDecimal（JSON 数字），
+#      而所有 Long（userTotal / count / productId…）被 JacksonConfig 序列化成【字符串】。
+# ─────────────────────────────────────────────────────────────────────────────
+
+### 6.18 数据统计·概览卡片（8 个数字）
+GET {{base}}/admin/stats/overview
+Authorization: Bearer {{admin_token}}
+
+> {%
+    client.test("6.18 概览：code=200 且 8 个字段齐全", function () {
+        client.assert(response.body.code === 200, "code 应为 200，实际 " + response.body.code);
+        var d = response.body.data;
+        ["userTotal", "userTodayNew", "productTotal", "productTodayNew",
+         "orderTotal", "orderTodayNew", "gmvTotal", "gmvToday"].forEach(function (k) {
+            client.assert(d[k] !== undefined && d[k] !== null, "缺少字段 " + k);
+        });
+    });
+%}
+
+
+### 6.19 数据统计·订单状态分布（恒定 8 条，status 0~7 全量补齐）
+GET {{base}}/admin/stats/order-status
+Authorization: Bearer {{admin_token}}
+
+> {%
+    client.test("6.19 订单状态分布：恒定 8 条且含 status/count", function () {
+        client.assert(response.body.code === 200, "code 应为 200，实际 " + response.body.code);
+        var list = response.body.data;
+        client.assert(Array.isArray(list) && list.length === 8,
+            "应为 8 条（0~7 补零），实际 " + (list ? list.length : "null"));
+        list.forEach(function (it) {
+            client.assert(it.status !== undefined && it.count !== undefined,
+                "条目缺少 status/count：" + JSON.stringify(it));
+        });
+    });
+%}
+
+
+### 6.20 数据统计·商品分类分布（空分类也返回；孤儿商品汇总为最后一条）
+GET {{base}}/admin/stats/product-category
+Authorization: Bearer {{admin_token}}
+
+> {%
+    client.test("6.20 分类分布：数组且含 categoryName/count", function () {
+        client.assert(response.body.code === 200, "code 应为 200，实际 " + response.body.code);
+        var list = response.body.data;
+        client.assert(Array.isArray(list), "data 应为数组");
+        list.forEach(function (it) {
+            client.assert(it.count !== undefined, "条目缺少 count：" + JSON.stringify(it));
+        });
+    });
+%}
+
+
+### 6.21a 数据统计·趋势（days=7，三条序列长度必须都等于 7）
+GET {{base}}/admin/stats/trend?days=7
+Authorization: Bearer {{admin_token}}
+
+> {%
+    client.test("6.21a 趋势 days=7：dates/orderCounts/productCounts/userCounts 长度一致", function () {
+        client.assert(response.body.code === 200, "code 应为 200，实际 " + response.body.code);
+        var d = response.body.data;
+        client.assert(d.days === 7, "days 应为 7，实际 " + d.days);
+        ["dates", "orderCounts", "productCounts", "userCounts"].forEach(function (k) {
+            client.assert(Array.isArray(d[k]) && d[k].length === 7,
+                k + " 长度应为 7，实际 " + (d[k] ? d[k].length : "null"));
+        });
+    });
+%}
+
+
+### 6.21b ★趋势 days 白名单：传 15 → 期望 code=100
+GET {{base}}/admin/stats/trend?days=15
+Authorization: Bearer {{admin_token}}
+
+> {%
+    client.test("6.21b days=15 越界 → code=100", function () {
+        client.assert(response.body.code === 100, "code 应为 100，实际 " + response.body.code + " / " + response.body.msg);
+    });
+%}
+
+
+### 6.22a 数据统计·热门商品榜（days=30&limit=5）
+GET {{base}}/admin/stats/hot-products?days=30&limit=5
+Authorization: Bearer {{admin_token}}
+
+> {%
+    client.test("6.22a 热门榜：days=30 且 items 数组长度 ≤ limit", function () {
+        client.assert(response.body.code === 200, "code 应为 200，实际 " + response.body.code);
+        var d = response.body.data;
+        client.assert(d.days === 30, "days 应为 30，实际 " + d.days);
+        client.assert(Array.isArray(d.items), "items 应为数组（无数据时是空数组，不是 null）");
+        client.assert(d.items.length <= 5, "items 长度应 ≤ 5，实际 " + d.items.length);
+    });
+%}
+
+
+### 6.22b ★热门榜 limit 白名单：limit=21 → 期望 code=100
+GET {{base}}/admin/stats/hot-products?days=7&limit=21
+Authorization: Bearer {{admin_token}}
+
+> {%
+    client.test("6.22b limit=21 越界 → code=100", function () {
+        client.assert(response.body.code === 100, "code 应为 100，实际 " + response.body.code + " / " + response.body.msg);
+    });
+%}
+
+
+### 6.23 ★越权：普通用户访问管理端统计 → HTTP 200 + code=403
+GET {{base}}/admin/stats/overview
+Authorization: Bearer {{buyer_token}}
+
+> {%
+    client.test("6.23 普通用户访问 /admin/stats → code=403", function () {
+        client.assert(response.status === 200, "HTTP 状态应为 200（业务码承载错误），实际 " + response.status);
+        client.assert(response.body.code === 403, "code 应为 403，实际 " + response.body.code + " / " + response.body.msg);
     });
 %}
 

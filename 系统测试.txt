@@ -291,6 +291,16 @@ X.8 测试结论
 系统在功能正确性、安全防护有效性、并发一致性三个维度均达到生产级标准，可以交付使用。
 
 ===============================================================
+【批次追加区 · 起始】以下为 5.5.3 及之后各批次的真机验证记录
+===============================================================
+说明	X.1~X.8 是论文定稿时的一次性系统测试报告（128 条 HTTP 验收用例、5 个 JUnit 类、1000 线程并发），
+	其正文与数字保持原样、不再回改。本区为**追加区**：每批验证完成后只追加一段，
+	记录该批的编译/单测/真机场景、命令、结果与"没能验证的部分"，便于追溯"哪一版代码做过哪些验证"。
+追溯	按批次的提交哈希可在 git 历史中定位；按时间线为 5.5.3 → 6.0.2 → 6.0.3 → 6.0.4 → 6.0.5.1 → 6.0.5.2。
+	其中 6.0.1（JWT fail-fast + email.skip 默认收紧）当时未在本文件单独成段，
+	其验证记录见该批提交 f390b20 的交付报告与 docs/自审报告-2026-09-19.md 中的 S1 / S2 条目。
+
+===============================================================
 5.5.3 收尾批测试结果
 ===============================================================
 测试时间	2026-09-19 00:54
@@ -619,6 +629,56 @@ d	prod 全配好 → 正常启动（18081）；/doc.html、/v3/api-docs、/swagg
 
 六、数据清理核对
 	残留商品/订单/用户=0；上传目录 product/{userId}/ 下的测试文件与 Redis 配额键均已删除
+
+
+===============================================================
+文档修复批测试结果（文档债务清偿：全量对齐 + .gitignore/uploads + request.js 文案）
+===============================================================
+测试时间	2026-09-19 16:23 ~ 16:50
+测试范围	① 文档对齐：README / docs/API_INTERFACE_SPEC.md / PROJECT_CONTEXT.md / SYSTEM_PROMPT.md /
+		BATCH_TEMPLATE.md / 系统测试.txt / api-tests.http / frontend/README.md；
+		② .gitignore 忽略 uploads 下的用户图；
+		③ frontend/src/utils/request.js 连接失败提示按环境分流。
+		**本批未改任何业务代码**（后端 0 行改动，前端仅一处文案）。
+测试环境	Windows 11 / OpenJDK 21.0.12 / Node v22.23.2 / Vite 5.4.21 / MySQL 8.0.46 / Redis 5.0.14
+
+一、后端全量回归（目的：确认"文档里写的现状"就是代码的真实现状）
+命令	javac -parameters -encoding UTF-8（159 个主源文件，155 个 classpath jar）→
+	42 个测试类编译 → JUnit Platform Launcher（-Djdk.attach.allowAttachSelf=true）
+结果	42 containers / 222 用例 全部通过：TESTS_FOUND=222 SUCCEEDED=222 FAILED=0 SKIPPED=0（30.4 s）
+说明	本批未改后端代码，此结果同时充当"文档交付物表里 42 类 / 222 用例"这一数字的实测依据
+
+二、前端测试与门禁（本批改了 request.js 文案，须重跑）
+命令	npx vitest run
+结果	18 个文件 / 187 个用例全绿（21.45 s）——与 README 交付物表写的数字一致
+命令	npm run verify（= build + verify:styles + verify:chunks）
+结果	构建无 error（built in 8.70 s，2440 modules）；样式完整性 11/11 关键字命中；
+	分包检查通过：59 个 JS 产物中 echarts-BhFyyVqz.js 独立成 chunk（557.08 kB），
+	AdminDashboardView 14.23 kB 且不含 ECharts
+
+三、文档一致性核对（本批的主要验证对象，全部为可复现的命令级检查）
+	① 版本号三处一致	README 标题「V32 对齐」/ API_INTERFACE_SPEC 标题「V32 封版对齐」/ PROJECT_CONTEXT 头部「正式封版 V32」
+	② 旧版本号残留	README 与 api-tests.http 中 grep 'V2[0-9]' → 0 命中（原 README 的 V26、api-tests 的 V26 已改）
+	③ 新增接口进契约	grep '/api/v1/admin/stats' docs/API_INTERFACE_SPEC.md → 6 命中（小节前言 + 7.11~7.15 五行）
+	④ 失效接口已删	grep 'product/favorite/list' docs/API_INTERFACE_SPEC.md → 0 命中（正确路径 /api/v1/favorite/list 保留在 5.3）
+	⑤ uploads 忽略	git check-ignore -v uploads/product/9999/x.jpg → .gitignore:10:/uploads/product/；
+			git check-ignore -v uploads/demo-textbook-01.png → 无输出（未被忽略）
+	⑥ 演示图未误伤	git ls-files uploads/ → 17 个（与 .gitignore 注释里写的数量一致）
+	⑦ 新章节可检索	grep '文档同步检查' SYSTEM_PROMPT.md → 2 命中（收尾钩子 + 章节标题）
+	⑧ 补齐的缺口		自审报告修复标记已统一为「已修复（批次号）」；PROJECT_CONTEXT 头部补回 V24 / V26，
+			并注明 V25 全仓与 git 历史均无引用、不可考（不臆造）
+	⑨ frontend/README.md	文中数字与目录树逐项核对：17 个 views 文件 / 27 条命名路由 / 18 个测试文件 187 用例 /
+			uploads 下 17 张 demo-*.png / `views/admin` 7 个文件 / `components/admin` 2 个源文件 + 1 个 spec
+			（PlaceholderView.vue 已无路由引用，文中已标注为"预留占位页"）
+
+四、没能验证的部分
+	· api-tests.http 本批【未逐条真机执行】：新增的 6.18~6.23（管理端统计 5 个接口 + 白名单越界 + 越权 403）
+	  与 4.33（面交卖家确认 1→3）是按 Controller / VO / ServiceImpl 与 Mapper 守卫写的断言；
+	  这些接口本身在 5.5.x / 6.0.5.1 批次已各有单测与真机记录，但本批没有启动后端复跑这组 .http
+	· 文档中描述的 prod 行为（文档路径被封禁 → HTTP 200 + code=100、CSP/HSTS 下发边界）沿用
+	  6.0.2 / 6.0.3 批次的真机结论，本批未重新起 prod 实例
+	· .env* 仍未加入 .gitignore（Minor 20 的残留部分，仓库当前无该文件），列入下一批建议
+
 
 
 
